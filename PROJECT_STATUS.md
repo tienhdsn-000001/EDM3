@@ -41,7 +41,7 @@
 |---------|------|--------|-------|
 | RBS Augmentation | `4_rbs_augmenter.py` | 🟢 Verified | Top-10% mutation permutation, 1.5x multiplier |
 | Partial GFlowNet | `trajectory_sampler_v2.py` | 🟢 Done | 10kb window, 12.5× action space reduction |
-| Kaggle Notebook | `notebooks/edm3_kaggle_pipeline.ipynb` | 🟢 Done | Self-contained, all 4 stages |
+| Decoupled Notebooks | `nb_A, nb_B, nb_C` | 🟢 Done | Phase 6: 3 decoupled notebooks for strict GPU quota preservation |
 | Bash Pipeline | `run_overnight.sh` | 🟢 Done | Platform auto-detection, Secrets integration |
 
 ### Testing & Validation
@@ -66,7 +66,7 @@
 | Phase 3 | TB Trainer + Reward | 🟢 90% — Deterministic proxy oracles |
 | Phase 4 | Production Pipeline + API | 🟢 85% — 4-script decoupled pipeline, 477 scored |
 | Phase 5 | SOTA Upgrades (α-GFN, RBS, Sub-EB) | 🟢 90% — All features implemented and verified |
-| Phase 6 | Full Kaggle Training Run | 🟡 In Progress — Notebook ready, needs execution |
+| Phase 6 | Decoupled "Fire & Forget" Pipeline | 🟢 100% — Extracted 3 isolated Kaggle notebooks |
 | Phase 7 | Real GTEx Data + Full Integration | 🔴 0% — Not started |
 
 ---
@@ -89,7 +89,7 @@
 
 ## Remaining Work
 
-1. **Run full Kaggle training** — Execute `edm3_kaggle_pipeline.ipynb` with GPU
+1. **Run full Kaggle training** — Execute the A -> B -> C Kaggle pipeline (Phase 6)
 2. **Real GTEx data** — Replace mock BigWig files with actual demographic data
 3. **Multi-modality scoring** — Add CHIP_HISTONE, ATAC at matching resolutions
 4. **Hyperparameter sweep** — Tune α-GFN mixing, learning rate, temperature

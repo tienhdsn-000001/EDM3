@@ -31,32 +31,26 @@ Wild-type DNA → [GFlowNet MDP: 10 mutations] → Mutated DNA
 
 ## 🚀 Quick Start — Run on Kaggle (Recommended)
 
-### One-Shot Setup
+The pipeline is decoupled into three notebooks to protect GPU quota from the slow AlphaGenome API.
 
-1. **Upload to Kaggle:**
-   ```
-   Go to kaggle.com → New Notebook → Upload Notebook
-   Upload: notebooks/edm3_kaggle_pipeline.ipynb
-   ```
+### Phase 6: Decoupled "Fire & Forget" Execution
 
-2. **Set API Key:**
-   ```
-   Add-ons → Secrets → Add
-   Name:  ALPHAGENOME_API_KEY
-   Value: your-api-key-here
-   ```
+1. **Step 1: Generation (`notebooks/nb_A_generator.ipynb`)**
+   - **Hardware**: GPU T4 ×2
+   - **Action**: Run all. Generates 5,000 trajectories using the dual-head Conv1D policy.
+   - **Output**: Export `/kaggle/working` as a dataset named `unscored-trajectories`.
 
-3. **Enable GPU:**
-   ```
-   Settings → Accelerator → GPU T4 ×2
-   ```
+2. **Step 2: API Worker (`notebooks/nb_B_api_worker.ipynb`)**
+   - **Hardware**: **CPU ONLY** (Accelerator: None)
+   - **Data**: Mount the `unscored-trajectories` dataset to `../input/unscored-trajectories/`.
+   - **Action**: Run via "Save Version -> Save & Run All (Commit)".
+   - **Resilience**: Runs asynchronously in the background for up to 12 hours. Uses SQLite WAL to save incrementally.
+   - **Output**: Export `/kaggle/working` as a dataset named `edm3-experience-buffer`.
 
-4. **Run All** — the notebook handles everything:
-   - Installs dependencies (JAX, Flax, Optax, alphagenome)
-   - Generates trajectories (dual-head Conv1D, T=2.0)
-   - Scores via AlphaGenome API (DNASE, 131,072-bp padded)
-   - RBS data augmentation
-   - Offline α-GFN training with convergence detection
+3. **Step 3: Offline Training (`notebooks/nb_C_offline_trainer.ipynb`)**
+   - **Hardware**: GPU T4 ×2
+   - **Data**: Mount the `edm3-experience-buffer` database.
+   - **Action**: Run all. Executes RBS augmentation and SOTA α-GFN offline training.
 
 ### Alternative: Bash Pipeline on Kaggle
 
@@ -122,12 +116,13 @@ from google.colab import userdata
 | `trajectory_sampler_v2.py` | Partial GFlowNet with 10kb windowed action masking |
 | `run_overnight.sh` | Orchestration script (Kaggle/Colab/Local auto-detection) |
 
-### Notebook
+### Notebooks (Phase 6 Decoupled)
 
 | File | Description |
 |------|-------------|
-| `notebooks/edm3_kaggle_pipeline.ipynb` | Self-contained Kaggle/Colab notebook (all 4 stages) |
-| `notebooks/edm3_kaggle_pipeline.py` | Percent-format source for the notebook |
+| `nb_A_generator.ipynb` | Fast GPU Trajectory Generation (5000 seq_len=100k) |
+| `nb_B_api_worker.ipynb` | Slow CPU Async AlphaGenome API Worker (WAL-sqlite) |
+| `nb_C_offline_trainer.ipynb` | Fast GPU RBS Augmentation and α-GFN Offline Training |
 
 ---
 
