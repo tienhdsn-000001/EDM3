@@ -1,14 +1,14 @@
-# EDM3 — Technical Audit of Experimental Rigor
+# EEPM3 — Technical Audit of Experimental Rigor
 
 **Auditor:** Independent AI Reviewer  
 **Date:** 2026-03-09  
-**Scope:** Assessment of scientific methodology, experimental design, statistical validity, and reproducibility across the entire EDM3 codebase.
+**Scope:** Assessment of scientific methodology, experimental design, statistical validity, and reproducibility across the entire EEPM3 codebase.
 
 ---
 
 ## 1. Executive Summary
 
-EDM3 contains **correct mathematical formulations** but **cannot currently support any scientific claim**. The experimental apparatus — while structurally sound as a software prototype — lacks the three prerequisites for experimental rigor: a real reward signal, a capable policy architecture, and convergence evidence. This audit evaluates each component against the standards expected for a computational biology research artifact.
+EEPM3 contains **correct mathematical formulations** but **cannot currently support any scientific claim**. The experimental apparatus — while structurally sound as a software prototype — lacks the three prerequisites for experimental rigor: a real reward signal, a capable policy architecture, and convergence evidence. This audit evaluates each component against the standards expected for a computational biology research artifact.
 
 ---
 
@@ -188,7 +188,7 @@ The pipeline design correctly mirrors AlphaGenome's data requirements:
 
 ### 5.2 Demographic Target Construction ❌
 
-The core scientific claim of EDM3 — *mimicking demographic-specific epigenetic profiles* — requires constructing target tensors `T` that represent the epigenetic signature of a specific demographic group (e.g., "25-year-old female liver tissue"). This construction is **entirely absent**:
+The core scientific claim of EEPM3 — *mimicking epigenetic-specific epigenetic profiles* — requires constructing target tensors `T` that represent the epigenetic signature of a specific demographic group (e.g., "25-year-old female liver tissue"). This construction is **entirely absent**:
 
 - `target_metadata` in the trainer is a flat `jnp.ones((metadata_dim,))` vector
 - No demographic encoding scheme is defined
@@ -240,7 +240,7 @@ Invalid actions are masked with `-1e9` (not `-inf`). This prevents NaN in softma
 
 ## 8. Verdict
 
-**EDM3 is a well-structured software prototype that demonstrates competent JAX engineering, but it does not yet constitute an experiment.** The necessary preconditions for an experiment — a meaningful signal (real oracles), a capable learner (position-aware policy), and validity infrastructure (controls, statistics, convergence criteria) — are all absent.
+**EEPM3 is a well-structured software prototype that demonstrates competent JAX engineering, but it does not yet constitute an experiment.** The necessary preconditions for an experiment — a meaningful signal (real oracles), a capable learner (position-aware policy), and validity infrastructure (controls, statistics, convergence criteria) — are all absent.
 
 The path from prototype to experiment requires:
 
@@ -258,5 +258,6 @@ Although the real AlphaGenome model is not yet integrated, the system's capacity
 
 1. **Agnostic Optimization:** Trajectory Balance (TB) loss optimizes the policy (a|s)$ to match a reward distribution (x)$. It is mathematically agnostic to the source of (x)$.
 2. **The Noise Barrier:** The previous  dummy oracle created a randomly shifting landscape. Gradients against pure noise contain zero information, making learning impossible.
-3. **Deterministic Corridors:** By freezing a proxy neural network (same input $ightarrow$ same output), we created a static reward landscape. 
+3. **Deterministic Corridors:** By freezing a proxy neural network (same input $
+ightarrow$ same output), we created a static reward landscape. 
 4. **Proof of Capacity:** Because the JAX gradients flow end-to-end through the MDP and the new Conv1D policy, the optimizer can navigate this static proxy landscape. If the architecture can learn to maximize a lightweight deterministic proxy, it possesses the mathematical capacity to maximize the real AlphaGenome inference signal once integrated. The training scaffolding is structurally sound.

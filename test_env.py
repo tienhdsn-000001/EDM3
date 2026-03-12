@@ -5,7 +5,7 @@ from gflownet_env import GFlowNetEnv, EnvState, GeneratorPolicy
 
 def run_test():
     print("--------------------------------------------------")
-    print("EDM3 GFlowNet Environment Verification Log")
+    print("EEPM3 GFlowNet Environment Verification Log")
     print("--------------------------------------------------")
 
     seq_len = 100000

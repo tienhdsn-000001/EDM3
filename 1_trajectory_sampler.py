@@ -138,7 +138,7 @@ def main():
         num_trajectories = int(sys.argv[1])
 
     print("=" * 70)
-    print("EDM3 Phase 4: Offline Trajectory Sampler")
+    print("EEPM3 Phase 4: Offline Trajectory Sampler")
     print("=" * 70)
     print(f"[Config] Trajectories: {num_trajectories}")
     print(f"[Config] Sequence Length: {SEQ_LEN} bp")

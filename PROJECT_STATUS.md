@@ -1,4 +1,4 @@
-# EDM3 — Project Status
+# EEPM3 — Project Status
 
 **Last Updated:** 2026-03-10  
 **Overall Status:** 🟢 Phase 5 — SOTA Architecture Complete  

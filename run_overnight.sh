@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==========================================================================
-# EDM3: Production Sparse Training Pipeline
+# EEPM3: Production Sparse Training Pipeline
 #
 # Runs the full Phase 5 SOTA pipeline:
 #   1. Generate trajectories (Conv1D dual-head policy, T=2.0)
@@ -29,7 +29,7 @@ if [ -d "/content" ]; then
     PLATFORM="Colab"
     # Fallback logic: Use Drive if mounted, otherwise use local /content/data
     if [ -d "/content/drive/MyDrive" ]; then
-        DATA_DIR="/content/drive/MyDrive/EDM3_Data"
+        DATA_DIR="/content/drive/MyDrive/EEPM3_Data"
         echo "[COLAB] Persistence: Google Drive enabled."
     else
         DATA_DIR="/content/data"
@@ -101,7 +101,7 @@ LOG_FILE="logs/pipeline_${TIMESTAMP}.log"
 
 echo ""
 echo "=========================================="
-echo "EDM3 Phase 5: SOTA Sparse Training Pipeline"
+echo "EEPM3 Phase 5: SOTA Sparse Training Pipeline"
 echo "=========================================="
 echo "Start: $(date)"
 echo "Log:   ${LOG_FILE}"
@@ -121,7 +121,7 @@ else
          cp "${DATA_DIR}/unscored_trajectories.npz" "data/unscored_trajectories.npz"
          echo "[COPY] Imported trajectories from ${DATA_DIR}"
     else
-        NUM_TRAJ=${EDM3_NUM_TRAJECTORIES:-5000}
+        NUM_TRAJ=${EEPM3_NUM_TRAJECTORIES:-5000}
         echo "Generating ${NUM_TRAJ} trajectories (T=2.0, dual-head Conv1D)..."
         python 1_trajectory_sampler.py "$NUM_TRAJ" || {
             echo "[FATAL] Trajectory generation failed."

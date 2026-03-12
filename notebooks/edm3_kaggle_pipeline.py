@@ -12,11 +12,11 @@
 # ---
 
 # %% [markdown]
-# # EDM3: GFlowNet Sparse Training Pipeline
+# # EEPM3: GFlowNet Sparse Training Pipeline
 #
 # **Platform**: Kaggle (primary) / Colab (fallback)
 #
-# This notebook runs the full EDM3 training pipeline:
+# This notebook runs the full EEPM3 training pipeline:
 # 1. Install dependencies & upload local artifacts
 # 2. Generate trajectories (or load pre-generated)
 # 3. Score via AlphaGenome API
@@ -92,7 +92,7 @@ SEQ_LEN         = 100_000       # MDP sequence length
 API_SEQ_LEN     = 131_072       # AlphaGenome required length (N-padded)
 VOCAB_SIZE      = 5             # A, C, G, T, N
 NUM_EDITS       = 10            # Mutations per trajectory
-METADATA_DIM    = 10            # Demographic metadata dimension
+METADATA_DIM    = 10            # Epigenetic metadata dimension
 TEMPERATURE     = 2.0           # Sampling temperature for exploration
 BATCH_SIZE      = 32            # Training batch size
 LEARNING_RATE   = 1e-4

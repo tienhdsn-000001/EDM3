@@ -41,7 +41,7 @@ def assert_pytree_shapes_match(tree_a, tree_b, label_a="A", label_b="B"):
 
 def run_test():
     print("=" * 60)
-    print("EDM3 GFlowNet Trainer Verification Log")
+    print("EEPM3 GFlowNet Trainer Verification Log")
     print("=" * 60)
 
     # ── Configuration ──────────────────────────────────────────

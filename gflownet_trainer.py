@@ -1,5 +1,5 @@
 """
-GFlowNet Trajectory Balance Trainer for EDM3.
+GFlowNet Trajectory Balance Trainer for EEPM3.
 
 Weaves together:
   - Agent A's data pipeline outputs (targets T, masks M)

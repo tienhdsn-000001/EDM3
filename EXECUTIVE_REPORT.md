@@ -1,6 +1,6 @@
-# EDM3 — Independent Executive Audit Report
+# EEPM3 — Independent Executive Audit Report
 
-**Project:** Expandable Demographic Mimicry by Mutation Module for AlphaGenome (MDM3)  
+**Project:** Expandable Epigenetic Profile Mimicry Module by Mutation for AlphaGenome (MDM3)  
 **Audit Date:** 2026-03-09  
 **Auditor:** Independent AI Reviewer  
 **Classification:** Pre-Alpha Research Prototype
@@ -183,7 +183,7 @@ While the training loop runs and produces loss values, there is no convergence c
 
 ## 5. Verdict
 
-**EDM3 is a structurally sound research prototype (~60% complete) that successfully demonstrates end-to-end GFlowNet training loop mechanics on 100kb DNA sequences in pure JAX.** The MDP environment, TB loss formulation, data pipeline shapes, and VMAP-batched gradient computation are all correctly implemented.
+**EEPM3 is a structurally sound research prototype (~60% complete) that successfully demonstrates end-to-end GFlowNet training loop mechanics on 100kb DNA sequences in pure JAX.** The MDP environment, TB loss formulation, data pipeline shapes, and VMAP-batched gradient computation are all correctly implemented.
 
 **However, the system cannot produce scientifically valid results in its current state.** The three critical blockers — random oracle rewards, information-destroying policy, and false convergence reporting — must be resolved before any experimental conclusions can be drawn.
 

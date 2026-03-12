@@ -205,7 +205,7 @@ def update_step(
 
 def main():
     print("=" * 70)
-    print("EDM3 GFlowNet Convergence Training Log")
+    print("EEPM3 GFlowNet Convergence Training Log")
     print("=" * 70)
 
     # Architectural specs mimicking real production targets:

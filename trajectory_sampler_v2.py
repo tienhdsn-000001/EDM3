@@ -157,7 +157,7 @@ def main():
         num_trajectories = int(sys.argv[1])
 
     print("=" * 70)
-    print("EDM3 Phase 5: Partial GFlowNet Trajectory Sampler v2")
+    print("EEPM3 Phase 5: Partial GFlowNet Trajectory Sampler v2")
     print("=" * 70)
     print(f"[Config] Trajectories: {num_trajectories}")
     print(f"[Config] Sequence: {SEQ_LEN} bp | Window: {WINDOW_SIZE} bp")

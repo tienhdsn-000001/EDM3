@@ -52,7 +52,7 @@ def create_mock_environment():
 
 def test_pipeline():
     print("--------------------------------------------------")
-    print("EDM3 Data Pipeline Verification Log")
+    print("EEPM3 Data Pipeline Verification Log")
     print("--------------------------------------------------")
     print("Initializing Mock Environment...")
     meta_df = create_mock_environment()
