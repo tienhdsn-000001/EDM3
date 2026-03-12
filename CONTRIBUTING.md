@@ -1,25 +1,43 @@
 # Contributing to EEPM3
 
-Thank you for your interest in contributing to the Expandable Epigenetic Profile Mimicry Module by Mutation (EEPM3). To maintain the integrity of this research architecture, we use a structured contribution model.
+Welcome to the **Expandable Epigenetic Profile Mimicry Module by Mutation (EEPM3)**! We are glad you are interested in contributing to the project. This computational architecture tackles the inverse problem of genomic design, and we welcome improvements to its mathematical optimization, architectural efficiency, and biological priors.
+
+To ensure stability and maintain a high standard of code rigor, please follow the guidelines below.
 
 ## 🍴 Fork & Pull Request (PR) Model
 
-Direct pushes to the `main` branch are restricted. To contribute:
-1. **Fork** the repository to your own account.
-2. **Create a feature branch** for your changes:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-3. **Commit your changes** with descriptive messages.
-4. **Submit a Pull Request (PR)** against our `main` branch. 
+**Direct pushes to the `main` branch are strictly restricted.** All contributions must go through the Pull Request review process.
 
-Your PR will be reviewed for mathematical consistency and biological alignment before merging.
+1. **Fork** the repository to your personal GitHub account.
+2. **Clone** your fork locally:
+   ```bash
+   git clone https://github.com/your-username/EDM3.git
+   cd EDM3
+   ```
+3. **Create a feature branch** from `main`. Name it descriptively:
+   ```bash
+   git checkout -b feature/optimization-name
+   # or
+   git checkout -b fix/bug-description
+   ```
+4. **Commit your changes** with clear, concise commit messages.
+5. **Push** your branch to your forked repository:
+   ```bash
+   git push origin feature/optimization-name
+   ```
+6. **Submit a Pull Request (PR)** against the `main` branch of the upstream EEPM3 repository.
 
 ## 🐛 Bug Reports & Feature Requests
 
-Please use the **GitHub Issues** tab to report bugs or request new features before writing any code. This allows us to coordinate efforts and avoid duplicate work.
+**Please use the GitHub Issues tab to report bugs or request features before writing any code.** 
+
+If you encounter an unexpected error, a convergence failure, or an API polling issue, check the existing issues first. If your issue is new, open a detailed bug report specifying:
+- Your execution environment (e.g., Colab, local GPU, driver version).
+- The exact error traceback.
+- Steps to reproduce the bug.
+
+If you have a major architectural feature request or optimization proposal, opening an issue allows the maintainers to discuss the approach with you *before* you invest time in coding.
 
 ---
 
-## 🔬 Note on Clinical Validation
-EEPM3 is a computational research prototype. Contributions that improve the mathematical rigor of the $\alpha$-GFN objective, the efficiency of the Sub-EB evaluation, or the diversity of RBS augmentation are highly encouraged.
+Thank you for your interest in advancing epigenetic inverse design!
