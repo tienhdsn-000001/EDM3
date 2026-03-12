@@ -25,20 +25,24 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
 
 # ── Platform Detection ────────────────────────────────────────
-if [ -d "/kaggle" ]; then
-    PLATFORM="Kaggle"
-    DATA_DIR="/kaggle/working/data"
-    # Kaggle sets secrets as env vars automatically
-elif [ -d "/content" ]; then
+if [ -d "/content" ]; then
     PLATFORM="Colab"
     # Automation: Mount Google Drive for persistence
     if [ ! -d "/content/drive" ]; then
         echo "[COLAB] Mounting Google Drive..."
-        python -c "from google.colab import drive; drive.mount('/content/drive')"
+        # Use Python to mount reliably
+        python -c "from google.colab import drive; drive.mount('/content/drive')" || echo "[WARN] Drive mount failed."
     fi
     DATA_DIR="/content/drive/MyDrive/EDM3_Data"
     # Pull API key from Colab Secrets
-    ALPHA_GENOME_API_KEY=$(python -c "from google.colab import userdata; print(userdata.get('ALPHA_GENOME_API_KEY'))" 2>/dev/null || echo "${ALPHA_GENOME_API_KEY:-}")
+    SECRET=$(python -c "from google.colab import userdata; print(userdata.get('ALPHA_GENOME_API_KEY'))" 2>/dev/null || echo "")
+    if [ -n "$SECRET" ]; then
+        ALPHA_GENOME_API_KEY="$SECRET"
+    fi
+elif [ -d "/kaggle" ]; then
+    PLATFORM="Kaggle"
+    DATA_DIR="/kaggle/working/data"
+    # Kaggle sets secrets as env vars if correctly mapped
 else
     PLATFORM="Local"
     DATA_DIR="${PROJECT_DIR}/data"
