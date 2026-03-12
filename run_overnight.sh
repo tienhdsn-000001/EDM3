@@ -105,8 +105,13 @@ echo "=========================================="
 if [ -f "${DATA_DIR}/unscored_trajectories.npz" ]; then
     echo "[SKIP] Found existing trajectories at ${DATA_DIR}/unscored_trajectories.npz."
     echo "       Linking to local data folder..."
-    mkdir -p data
+    rm -rf data && mkdir -p data
     ln -sf "${DATA_DIR}/unscored_trajectories.npz" "data/unscored_trajectories.npz"
+    # Also link the DB if it exists on Drive to ensure it persists!
+    if [ -f "${DATA_DIR}/experience_replay.db" ]; then
+        ln -sf "${DATA_DIR}/experience_replay.db" "data/experience_replay.db"
+        echo "[RESUME] Linked existing database from Drive."
+    fi
 else
     NUM_TRAJ=${EDM3_NUM_TRAJECTORIES:-5000}
     echo "Generating ${NUM_TRAJ} trajectories (T=2.0, dual-head Conv1D)..."

@@ -66,7 +66,6 @@ def init_database(db_path: str) -> sqlite3.Connection:
             trajectory_id INTEGER PRIMARY KEY,
             actions BLOB NOT NULL,
             forward_log_probs BLOB NOT NULL,
-            terminal_onehot BLOB NOT NULL,
             reward REAL NOT NULL,
             api_latency_ms REAL,
             scored_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -91,20 +90,18 @@ def insert_experience(
     trajectory_id: int,
     actions: np.ndarray,
     forward_log_probs: np.ndarray,
-    terminal_onehot: np.ndarray,
     reward: float,
     api_latency_ms: float,
 ):
     """Inserts a scored experience and flushes immediately."""
     conn.execute(
         "INSERT OR REPLACE INTO experiences "
-        "(trajectory_id, actions, forward_log_probs, terminal_onehot, reward, api_latency_ms) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(trajectory_id, actions, forward_log_probs, reward, api_latency_ms) "
+        "VALUES (?, ?, ?, ?, ?)",
         (
             trajectory_id,
             actions.tobytes(),
             forward_log_probs.tobytes(),
-            terminal_onehot.tobytes(),
             float(reward),
             float(api_latency_ms),
         ),
@@ -277,7 +274,6 @@ async def process_trajectory(
     sequence: str,
     actions: np.ndarray,
     forward_log_probs: np.ndarray,
-    terminal_onehot: np.ndarray,
     targets: np.ndarray,
     mask: np.ndarray,
     api_key: str,
@@ -310,7 +306,7 @@ async def process_trajectory(
 
         insert_experience(
             conn, trajectory_id, actions, forward_log_probs,
-            terminal_onehot, reward, api_latency_ms,
+            reward, api_latency_ms,
         )
 
         stats["scored"] += 1
@@ -337,7 +333,7 @@ async def run_api_worker(api_key: str):
         sys.exit(1)
 
     data = np.load(INPUT_PATH, allow_pickle=True)
-    terminal_onehot = data["terminal_onehot"]   # (N, L, 5)
+    # terminal_onehot removed to save 10GB RAM
     actions = data["actions"]                     # (N, num_edits)
     forward_log_probs = data["forward_log_probs"] # (N, num_edits)
     sequences = data["sequences"]                  # (N,) object array of ACGTN strings
@@ -400,7 +396,6 @@ async def run_api_worker(api_key: str):
                 sequence=seq_str,
                 actions=actions[traj_id],
                 forward_log_probs=forward_log_probs[traj_id],
-                terminal_onehot=terminal_onehot[traj_id],
                 targets=targets,
                 mask=mask_tensor,
                 api_key=api_key,

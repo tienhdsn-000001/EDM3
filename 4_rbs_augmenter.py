@@ -50,7 +50,6 @@ def init_augmented_db(db_path: str) -> sqlite3.Connection:
             source_trajectory_id INTEGER,
             actions BLOB NOT NULL,
             forward_log_probs BLOB NOT NULL,
-            terminal_onehot BLOB NOT NULL,
             reward REAL NOT NULL,
             is_augmented INTEGER DEFAULT 0,
             augmentation_method TEXT
@@ -68,7 +67,6 @@ def load_source_experiences(db_path: str) -> list:
 
     conn = sqlite3.connect(db_path)
     cursor = conn.execute(
-        "SELECT trajectory_id, actions, forward_log_probs, terminal_onehot, reward "
         "FROM experiences ORDER BY reward DESC"
     )
 
@@ -77,13 +75,11 @@ def load_source_experiences(db_path: str) -> list:
         traj_id, actions_bytes, lp_bytes, onehot_bytes, reward = row
         actions = np.frombuffer(actions_bytes, dtype=np.int32).copy()
         forward_log_probs = np.frombuffer(lp_bytes, dtype=np.float32).copy()
-        terminal_onehot = np.frombuffer(onehot_bytes, dtype=np.float32).reshape(SEQ_LEN, 5).copy()
 
         experiences.append({
             "trajectory_id": traj_id,
             "actions": actions,
             "forward_log_probs": forward_log_probs,
-            "terminal_onehot": terminal_onehot,
             "reward": reward,
         })
 
@@ -192,7 +188,6 @@ def hallucinate_trajectories(
             "source_trajectory_id": experience["trajectory_id"],
             "actions": perm_actions,
             "forward_log_probs": perm_log_probs,
-            "terminal_onehot": experience["terminal_onehot"],
             "reward": experience["reward"],
         })
 
@@ -240,13 +235,11 @@ def main():
     for exp in experiences:
         aug_conn.execute(
             "INSERT INTO experiences "
-            "(source_trajectory_id, actions, forward_log_probs, terminal_onehot, reward, is_augmented, augmentation_method) "
             "VALUES (?, ?, ?, ?, ?, 0, 'original')",
             (
                 exp["trajectory_id"],
                 exp["actions"].tobytes(),
                 exp["forward_log_probs"].tobytes(),
-                exp["terminal_onehot"].tobytes(),
                 exp["reward"],
             ),
         )
@@ -263,13 +256,11 @@ def main():
         for h in hallucinated:
             aug_conn.execute(
                 "INSERT INTO experiences "
-                "(source_trajectory_id, actions, forward_log_probs, terminal_onehot, reward, is_augmented, augmentation_method) "
                 "VALUES (?, ?, ?, ?, ?, 1, 'rbs_permutation')",
                 (
                     h["source_trajectory_id"],
                     h["actions"].tobytes(),
                     h["forward_log_probs"].tobytes(),
-                    h["terminal_onehot"].tobytes(),
                     h["reward"],
                 ),
             )
