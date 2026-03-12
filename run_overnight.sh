@@ -35,6 +35,17 @@ if [ -d "/content" ]; then
         DATA_DIR="/content/data"
         echo "[COLAB] Warning: Drive not mounted. Data will be lost if session disconnects."
     fi
+    # --- Hardened Persistence: Symlink core folders to Drive ---
+    for dir in "data" "logs" "checkpoints"; do
+        mkdir -p "${DATA_DIR}/${dir}"
+        if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+            # If a local dir exists but isn't a symlink, merge it to Drive then remove
+            cp -rn "$dir"/. "${DATA_DIR}/${dir}/" 2>/dev/null || true
+            rm -rf "$dir"
+        fi
+        ln -sfn "${DATA_DIR}/${dir}" "$dir"
+        echo "[COLAB] Persistence: $dir -> ${DATA_DIR}/${dir}"
+    done
     # Pull API key from Colab Secrets (if available)
     SECRET=$(python -c "try: from google.colab import userdata; print(userdata.get('ALPHA_GENOME_API_KEY')); except: pass" 2>/dev/null || echo "")
     if [ -n "$SECRET" ]; then
@@ -102,23 +113,21 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=========================================="
 echo "STEP 1: Trajectory Generation"
 echo "=========================================="
-if [ -f "${DATA_DIR}/unscored_trajectories.npz" ]; then
-    echo "[SKIP] Found existing trajectories at ${DATA_DIR}/unscored_trajectories.npz."
-    echo "       Linking to local data folder..."
-    rm -rf data && mkdir -p data
-    ln -sf "${DATA_DIR}/unscored_trajectories.npz" "data/unscored_trajectories.npz"
-    # Also link the DB if it exists on Drive to ensure it persists!
-    if [ -f "${DATA_DIR}/experience_replay.db" ]; then
-        ln -sf "${DATA_DIR}/experience_replay.db" "data/experience_replay.db"
-        echo "[RESUME] Linked existing database from Drive."
-    fi
+if [ -f "data/unscored_trajectories.npz" ]; then
+    echo "[SKIP] Found existing trajectories in persistent data storage."
 else
-    NUM_TRAJ=${EDM3_NUM_TRAJECTORIES:-5000}
-    echo "Generating ${NUM_TRAJ} trajectories (T=2.0, dual-head Conv1D)..."
-    python 1_trajectory_sampler.py "$NUM_TRAJ" || {
-        echo "[FATAL] Trajectory generation failed."
-        exit 1
-    }
+    # Check if user provided them manually in the root Drive folder or local
+    if [ -f "${DATA_DIR}/unscored_trajectories.npz" ]; then
+         cp "${DATA_DIR}/unscored_trajectories.npz" "data/unscored_trajectories.npz"
+         echo "[COPY] Imported trajectories from ${DATA_DIR}"
+    else
+        NUM_TRAJ=${EDM3_NUM_TRAJECTORIES:-5000}
+        echo "Generating ${NUM_TRAJ} trajectories (T=2.0, dual-head Conv1D)..."
+        python 1_trajectory_sampler.py "$NUM_TRAJ" || {
+            echo "[FATAL] Trajectory generation failed."
+            exit 1
+        }
+    fi
 fi
 echo "[✓] Step 1 complete."
 
