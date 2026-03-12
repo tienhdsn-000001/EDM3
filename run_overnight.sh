@@ -102,13 +102,19 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo "=========================================="
 echo "STEP 1: Trajectory Generation"
 echo "=========================================="
-NUM_TRAJ=${EDM3_NUM_TRAJECTORIES:-500}
-echo "Generating ${NUM_TRAJ} trajectories (T=2.0, dual-head Conv1D)..."
-
-python 1_trajectory_sampler.py "$NUM_TRAJ" || {
-    echo "[FATAL] Trajectory generation failed."
-    exit 1
-}
+if [ -f "${DATA_DIR}/unscored_trajectories.npz" ]; then
+    echo "[SKIP] Found existing trajectories at ${DATA_DIR}/unscored_trajectories.npz."
+    echo "       Linking to local data folder..."
+    mkdir -p data
+    ln -sf "${DATA_DIR}/unscored_trajectories.npz" "data/unscored_trajectories.npz"
+else
+    NUM_TRAJ=${EDM3_NUM_TRAJECTORIES:-5000}
+    echo "Generating ${NUM_TRAJ} trajectories (T=2.0, dual-head Conv1D)..."
+    python 1_trajectory_sampler.py "$NUM_TRAJ" || {
+        echo "[FATAL] Trajectory generation failed."
+        exit 1
+    }
+fi
 echo "[✓] Step 1 complete."
 
 # ── Step 2: AlphaGenome API Scoring ───────────────────────────
