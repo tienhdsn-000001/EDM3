@@ -208,15 +208,23 @@ def _get_evo2_model():
     if model_name == "legacy_oracle":
         return "legacy_oracle"
 
-    # CPU Check for foundation models
-    if not torch.cuda.is_available():
+    # Device Selection
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # TPU Detection (via environment variables common in Colab/Kaggle TPU VMs)
+    is_tpu = any(k in os.environ for k in ["TPU_NAME", "TPU_ACCELERATOR_TYPE", "JAX_PLATFORMS"])
+    if is_tpu and device == "cpu":
+        log.info("[TPU/Hybrid] TPU detected. Offloading Evo2 foundation model to TPU VM CPU.")
+        log.info("[TPU/Hybrid] Performance Note: 7B CPU inference is memory-heavy. Using bfloat16.")
+    elif not torch.cuda.is_available() and not is_tpu:
+        # Standard CPU-only fallback logic
         log.error("=" * 70)
-        log.error("[CRITICAL] NO GPU DETECTED (Usage Limits?)")
-        log.error("The Evo2 7B model requires a T4 GPU (16GB VRAM) to run.")
-        log.error("If you have hit your Colab GPU limits, you MUST switch to the oracle:")
+        log.error("[CRITICAL] NO GPU OR TPU DETECTED")
+        log.error("The Evo2 7B model requires hardware acceleration.")
+        log.error("If you are on a restricted CPU instance, switch to the oracle:")
         log.error("  export EVO2_MODEL_NAME=legacy_oracle")
         log.error("=" * 70)
-        raise RuntimeError("GPU required for Evo2 foundation model. Switch to legacy_oracle if necessary.")
+        raise RuntimeError("Hardware acceleration required for Evo2. Switch to legacy_oracle if necessary.")
 
     if _evo2_model is None:
         try:
@@ -227,14 +235,15 @@ def _get_evo2_model():
             # This call handles weight download/verification
             _evo2_model = Evo2(model_name)
             
-            log.info(f"[Evo2] Weights verified. Moving to GPU (bfloat16)...")
-            _evo2_model = _evo2_model.to("cuda", dtype=torch.bfloat16)
+            # Use bfloat16 for RAM efficiency on both T4 and TPU VM CPUs
+            dtype = torch.bfloat16
+            log.info(f"[Evo2] Weights verified. Moving to {device} ({dtype})...")
+            _evo2_model = _evo2_model.to(device, dtype=dtype)
             _evo2_model.eval()
-            log.info(f"[Evo2] Model {model_name} is LIVE and ready for inference.")
+            log.info(f"[Evo2] Model {model_name} is LIVE on {device}.")
         except Exception as e:
             log.error(f"[Evo2] Failed to initialize model: {e}")
-            log.error("  Suggestion: If it says 'flash_attn' missing, the mock should have handled it.")
-            log.error("  If it says 'OutOfMemory', make sure no other notebooks are using the GPU.")
+            log.error("  Suggestion: Ensure your environment has sufficient RAM (24GB+ for 7B CPU).")
             raise
     return _evo2_model
 
