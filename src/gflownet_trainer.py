@@ -4,7 +4,7 @@ GFlowNet Trajectory Balance Trainer for EEPM3.
 Weaves together:
   - Agent A's data pipeline outputs (targets T, masks M)
   - Agent B's MDP environment (GFlowNetEnv, GeneratorPolicy)
-  - Deterministic proxy oracles for AlphaGenome and Evo2
+  - Deterministic proxy oracles for AlphaGenome
   - Trajectory Balance (TB) Loss with learnable partition function Z
 
 All functions are pure and jax.jit-compatible.
@@ -51,40 +51,16 @@ class AlphaGenomeProxy(nn.Module):
         return projection[:, None] * track_scale[None, :]
 
 
-class Evo2Proxy(nn.Module):
-    """
-    Deterministic proxy for Evo2 sequence plausibility.
-
-    A frozen two-layer MLP that maps sequence composition to a scalar
-    log-likelihood score. Same input → same output, always.
-    """
-    @nn.compact
-    def __call__(self, seq_summary: jnp.ndarray) -> jnp.ndarray:
-        """
-        seq_summary: (vocab_size,) — mean base composition.
-        Returns: scalar log-likelihood.
-        """
-        x = nn.Dense(16, name="evo_h1")(seq_summary)
-        x = jax.nn.tanh(x)
-        x = nn.Dense(1, name="evo_h2")(x)
-        return x.squeeze(-1)  # scalar
-
-
 def init_oracle_params(key: jnp.ndarray, vocab_size: int = 5,
                        num_bins: int = 781, num_tracks: int = 5930) -> Dict[str, Any]:
     """
     Initialize frozen oracle parameters with a fixed seed.
     These parameters are never updated during training.
     """
-    key_ag, key_evo = jax.random.split(key)
-
     ag_proxy = AlphaGenomeProxy(num_bins=num_bins, num_tracks=num_tracks)
-    ag_params = ag_proxy.init(key_ag, jnp.zeros((vocab_size,)))
+    ag_params = ag_proxy.init(key, jnp.zeros((vocab_size,)))
 
-    evo_proxy = Evo2Proxy()
-    evo_params = evo_proxy.init(key_evo, jnp.zeros((vocab_size,)))
-
-    return {'alphagenome': ag_params, 'evo2': evo_params}
+    return {'alphagenome': ag_params}
 
 
 def deterministic_alphagenome_forward(
@@ -106,21 +82,7 @@ def deterministic_alphagenome_forward(
     return proxy.apply(oracle_params, seq_summary)
 
 
-def deterministic_evo2_prior(
-    sequence: jnp.ndarray,
-    oracle_params: Dict,
-) -> jnp.ndarray:
-    """
-    Deterministic Evo2 proxy forward pass.
 
-    sequence: (L, 5) one-hot DNA sequence
-    oracle_params: frozen Evo2Proxy parameters
-
-    Returns: scalar log-likelihood — same input always produces same output.
-    """
-    seq_summary = jnp.mean(sequence, axis=0)  # (5,)
-    proxy = Evo2Proxy()
-    return proxy.apply(oracle_params, seq_summary)
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +122,8 @@ def compute_reward(
     num_tracks: int = 5930,
 ) -> jnp.ndarray:
     """
-    R(x) = exp(-α · L_mask(AG(x), T, M)) + β · log P_Evo(x)
+    R(x) = exp(-α · L_mask(AG(x), T, M))
+    Note: Real Evo2 log P_Evo(x) logic has been moved to api_worker.
 
     terminal_seq: (L, 5) one-hot final mutated sequence
     targets:      (num_bins, num_tracks) demographic target tensor
@@ -175,9 +138,7 @@ def compute_reward(
     )
     l_mask = masked_modality_loss(ag_pred, targets, mask)
 
-    log_p_evo = deterministic_evo2_prior(terminal_seq, oracle_params['evo2'])
-
-    reward = jnp.exp(-alpha * l_mask) + beta * log_p_evo
+    reward = jnp.exp(-alpha * l_mask)
     # Clamp reward to be strictly positive (required for log in TB loss)
     reward = jnp.maximum(reward, 1e-8)
     return reward

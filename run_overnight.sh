@@ -68,9 +68,9 @@ if [ -f "venv/bin/activate" ]; then
 fi
 
 # Install dependencies if missing
-python -c "import jax, flax, optax, alphagenome" 2>/dev/null || {
+python -c "import jax, flax, optax, alphagenome, torch, evo2" 2>/dev/null || {
     echo "[INSTALL] Installing dependencies..."
-    pip install -q jax flax optax alphagenome 2>&1 | tail -3
+    pip install -q jax flax optax alphagenome torch flash-attn evo2 2>&1 | tail -3
 }
 
 # ── API Key Validation ────────────────────────────────────────

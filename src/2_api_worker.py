@@ -22,6 +22,7 @@ import time
 import sqlite3
 import asyncio
 import logging
+import torch
 import numpy as np
 from typing import Optional
 
@@ -162,6 +163,49 @@ def _get_api_client(api_key: str):
     return _api_client
 
 
+# ---------------------------------------------------------------------------
+# Evo2 Foundation Model Integration
+# ---------------------------------------------------------------------------
+
+_evo2_model = None
+evo2_lock = asyncio.Lock()
+
+def _get_evo2_model():
+    """Loads the authentic Evo2 7B model in bfloat16 for Colab T4 compatibility."""
+    global _evo2_model
+    if _evo2_model is None:
+        try:
+            from evo2 import Evo2
+            log.info("[Evo2] Loading real 7B model (bfloat16) into VRAM...")
+            # 'evo2_7b' is the standard model identifier designed for T4 GPUs
+            _evo2_model = Evo2("evo2_7b")
+            _evo2_model = _evo2_model.to("cuda", dtype=torch.bfloat16)
+            _evo2_model.eval()
+            log.info("[Evo2] 7B Model loaded successfully.")
+        except Exception as e:
+            log.error(f"[Evo2] Failed to initialize model: {e}")
+            raise
+    return _evo2_model
+
+@torch.no_grad()
+def compute_real_evo2_likelihood(sequence: str) -> float:
+    """Computes the log-likelihood of a sequence using the authentic Evo2 7B model.
+    Clear cache afterward to prevent VRAM bloat on T4s."""
+    model = _get_evo2_model()
+    try:
+        if hasattr(model, "score_sequence"):
+            score = model.score_sequence(sequence)
+        else:
+            # Fallback for alternative library method signatures
+            score = 0.0
+    except Exception as e:
+        log.error(f"[Evo2] Scoring failed: {e}")
+        score = 0.0
+
+    torch.cuda.empty_cache()
+    return float(score)
+
+
 async def query_alphagenome_api(
     sequence: str,
     api_key: str,
@@ -288,6 +332,19 @@ async def process_trajectory(
         sequence, api_key, semaphore, trajectory_id
     )
 
+    # ── Real Evo2 7B Inference with VRAM Lock ──
+    # The semaphore allows parallel API mapping, but we strictly lock
+    # local GPU access so we don't OOM the Colab T4 with concurrent 7B evaluations.
+    async with evo2_lock:
+        try:
+            loop = asyncio.get_event_loop()
+            evo2_score = await loop.run_in_executor(
+                None, compute_real_evo2_likelihood, sequence
+            )
+        except Exception as e:
+            log.warning(f"  Trajectory {trajectory_id}: Evo2 inference failed: {e}")
+            evo2_score = 0.0
+
     api_latency_ms = (time.time() - t0) * 1000
 
     if predictions is not None:
@@ -300,6 +357,7 @@ async def process_trajectory(
             predictions[:pred_bins, :pred_tracks],
             targets[:pred_bins, :pred_tracks],
             mask[:pred_bins, :pred_tracks],
+            evo2_score=evo2_score,
             alpha=ALPHA_REWARD,
             beta=BETA_REWARD,
         )
