@@ -94,6 +94,16 @@ export EVO2_MODEL_NAME="evo2_7b" # Default (Validated for T4)
 bash run_overnight.sh
 ```
 
+### 4.3 Persistent Model Caching (Colab)
+By default, `run_overnight.sh` automatically routes the HuggingFace cache (`HF_HOME`) to your mounted Google Drive (`/content/drive/MyDrive/EEPM3_Data/models/huggingface`). This **prevents you from having to re-download the ~15GB Evo2 model** every time your Colab runtime resets. 
+
+If you are running locally or wish to store the model elsewhere, simply export `HF_HOME` before running the script:
+
+```bash
+export HF_HOME="/your/custom/cache/path"
+bash run_overnight.sh
+```
+
 ---
 
 ## 5. March 2026 Benchmarks

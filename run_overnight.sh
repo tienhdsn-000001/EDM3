@@ -36,7 +36,7 @@ if [ -d "/content" ]; then
         echo "[COLAB] Warning: Drive not mounted. Data will be lost if session disconnects."
     fi
     # --- Hardened Persistence: Symlink core folders to Drive ---
-    for dir in "data" "logs" "checkpoints"; do
+    for dir in "data" "logs" "checkpoints" "models"; do
         mkdir -p "${DATA_DIR}/${dir}"
         if [ -d "$dir" ] && [ ! -L "$dir" ]; then
             # If a local dir exists but isn't a symlink, merge it to Drive then remove
@@ -46,6 +46,11 @@ if [ -d "/content" ]; then
         ln -sfn "${DATA_DIR}/${dir}" "$dir"
         echo "[COLAB] Persistence: $dir -> ${DATA_DIR}/${dir}"
     done
+    
+    # Persist HuggingFace Hub cache (Evo2 weights) to Google Drive
+    # Users can disable this by overriding HF_HOME before running the script.
+    export HF_HOME="${HF_HOME:-${DATA_DIR}/models/huggingface}"
+    echo "[COLAB] Persistence: HuggingFace Cache -> $HF_HOME"
     # Pull API key from Colab Secrets (if available)
     SECRET=$(python -c "try: from google.colab import userdata; print(userdata.get('ALPHA_GENOME_API_KEY')); except: pass" 2>/dev/null || echo "")
     if [ -n "$SECRET" ]; then
