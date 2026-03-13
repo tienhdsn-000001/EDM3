@@ -88,8 +88,8 @@ NUM_EDITS = 10
 METADATA_DIM = 10
 VOCAB_SIZE = 5
 BATCH_SIZE = 32
-TOTAL_EPOCHS = 200
-LEARNING_RATE = 1e-4
+TOTAL_EPOCHS = 500
+LEARNING_RATE = 3e-4
 MAX_GRAD_NORM = 1.0
 ALPHA_GFN = 0.5    # α-GFN mixing parameter (0=pure backward, 1=pure forward)
 CHECKPOINT_DIR = "checkpoints"
