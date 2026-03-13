@@ -177,12 +177,17 @@ def _get_evo2_model():
         try:
             from evo2 import Evo2
             model_name = os.environ.get("EVO2_MODEL_NAME", "evo2_7b")
-            log.info(f"[Evo2] Loading real model '{model_name}' (bfloat16) into VRAM...")
-            # 'evo2_7b' is the standard model identifier designed for T4 GPUs
+            log.info(f"[Evo2] Initializing authentic model: {model_name}")
+            log.info(f"[Evo2] Verification/Download phase started. This may take 5-10 minutes if not cached...")
+            
+            # This call usually handles the download progress bar internally,
+            # but we add an explicit log to avoid the "silent" hang feel.
             _evo2_model = Evo2(model_name)
+            
+            log.info(f"[Evo2] Weights verified. Moving to GPU (bfloat16)...")
             _evo2_model = _evo2_model.to("cuda", dtype=torch.bfloat16)
             _evo2_model.eval()
-            log.info(f"[Evo2] {model_name} loaded successfully.")
+            log.info(f"[Evo2] Model {model_name} is LIVE and ready for inference.")
         except Exception as e:
             log.error(f"[Evo2] Failed to initialize model: {e}")
             raise

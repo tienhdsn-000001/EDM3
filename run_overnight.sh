@@ -68,10 +68,21 @@ if [ -f "venv/bin/activate" ]; then
 fi
 
 # Install dependencies if missing
-python -c "import jax, flax, optax, alphagenome, torch, evo2" 2>/dev/null || {
-    echo "[INSTALL] Installing dependencies..."
-    pip install -q jax flax optax alphagenome torch flash-attn evo2 2>&1 | tail -3
+echo "[SETUP] Checking system dependencies..."
+python -c "import jax, flax, optax" 2>/dev/null || {
+    echo "  -> [INSTALL] JAX/Flax optimization suite..."
+    pip install jax flax optax 2>&1 | tail -n 5
 }
+python -c "import alphagenome" 2>/dev/null || {
+    echo "  -> [INSTALL] AlphaGenome SDK..."
+    pip install alphagenome 2>&1 | tail -n 5
+}
+python -c "import torch, evo2" 2>/dev/null || {
+    echo "  -> [INSTALL] PyTorch and Evo2 (Large Install)..."
+    echo "     Note: This can take several minutes due to model framework size."
+    pip install torch flash-attn evo2 2>&1 | tail -n 10
+}
+echo "[SETUP] Dependency check complete."
 
 # ── API Key Validation ────────────────────────────────────────
 if [ -z "${ALPHA_GENOME_API_KEY:-}" ]; then
