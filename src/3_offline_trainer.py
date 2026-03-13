@@ -249,7 +249,7 @@ optimizer = optax.chain(
 
 def main():
     print("=" * 70)
-    print("EEPM3 Phase 4: Offline JAX Trainer (Experience Replay)")
+    print("STEP 4: Offline JAX Trainer (Experience Replay)")
     print("=" * 70)
 
     # Load replay buffer

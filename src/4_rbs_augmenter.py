@@ -200,7 +200,7 @@ def hallucinate_trajectories(
 
 def main():
     print("=" * 70)
-    print("EEPM3 Phase 5: Retrospective Backward Synthesis (RBS) Augmenter")
+    print("STEP 3: Retrospective Backward Synthesis (RBS) Augmenter")
     print("=" * 70)
 
     # Load source data
