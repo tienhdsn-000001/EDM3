@@ -58,9 +58,9 @@ log = logging.getLogger("api_worker")
 
 INPUT_PATH = "data/unscored_trajectories.npz"
 DB_PATH = "data/experience_replay.db"
-MAX_CONCURRENCY = 5          # Semaphore limit (reduced to avoid RAM overload)
-MAX_RETRIES = 8              # Max exponential backoff retries per request
-BASE_BACKOFF = 1.0           # Base seconds for exponential backoff
+MAX_CONCURRENCY = 2          # Reduced to avoid RESOURCE_EXHAUSTED on AlphaGenome
+MAX_RETRIES = 12             # More retries for long overnight runs
+BASE_BACKOFF = 3.0           # Increased base backoff for gRPC stability
 ALPHA_REWARD = 1.0           # α in R(x) = exp(-α·L_mask) + β·log P_Evo
 BETA_REWARD = 0.1            # β weight on Evo2 term
 
@@ -200,8 +200,43 @@ def _get_api_client(api_key: str):
 # Evo2 Foundation Model Integration
 # ---------------------------------------------------------------------------
 
+import aiohttp
+
 _evo2_model = None
 evo2_lock = asyncio.Lock()
+
+async def _query_nvidia_hosted_evo2(sequence: str, api_key: str) -> float:
+    """Queries the NVIDIA Hosted API for high-rigor biological scores."""
+    url = "https://health.api.nvidia.com/v1/biology/arc/evo2-7b/generate"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "sequence": sequence,
+        "num_tokens": 1,
+        "top_k": 1,
+        "enable_sampled_probs": True
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    # We use the log-probability of the first token as the "likelihood" score
+                    # This is analogous to our local score_sequence logic.
+                    if "probabilities" in result and len(result["probabilities"]) > 0:
+                        return float(result["probabilities"][0])
+                    return 0.0
+                else:
+                    text = await resp.text()
+                    log.warning(f"[Evo2/Cloud] API Error {resp.status}: {text[:100]}")
+                    return 0.0
+    except Exception as e:
+        log.warning(f"[Evo2/Cloud] Request failed: {e}")
+        return 0.0
+
 
 def _get_evo2_model():
     """Loads the authentic Evo2 7B model in bfloat16 for Colab T4 compatibility."""
@@ -258,9 +293,15 @@ def _get_evo2_model():
     return _evo2_model
 
 @torch.no_grad()
-def compute_real_evo2_likelihood(sequence: str) -> float:
-    """Computes the log-likelihood of a sequence using the authentic Evo2 7B model.
-    Clear cache afterward to prevent VRAM bloat on T4s."""
+async def compute_real_evo2_likelihood(sequence: str) -> float:
+    """
+    Computes biological likelihood. Uses NVIDIA Hosted API if key is available,
+    otherwise falls back to local (CPU/TPU-offloaded) inference.
+    """
+    nv_key = os.environ.get("NVIDIA_API_KEY")
+    if nv_key:
+        return await _query_nvidia_hosted_evo2(sequence, nv_key)
+
     model = _get_evo2_model()
     
     # Handle Legacy Oracle mode
@@ -409,18 +450,13 @@ async def process_trajectory(
         sequence, api_key, semaphore, trajectory_id
     )
 
-    # ── Real Evo2 7B Inference with VRAM Lock ──
-    # The semaphore allows parallel API mapping, but we strictly lock
-    # local GPU access so we don't OOM the Colab T4 with concurrent 7B evaluations.
-    async with evo2_lock:
-        try:
-            loop = asyncio.get_event_loop()
-            evo2_score = await loop.run_in_executor(
-                None, compute_real_evo2_likelihood, sequence
-            )
-        except Exception as e:
-            log.warning(f"  Trajectory {trajectory_id}: Evo2 inference failed: {e}")
-            evo2_score = 0.0
+    # ── Real Evo2 7B Inference with VRAM Lock/Cloud Fallback ──
+    try:
+        # Note: compute_real_evo2_likelihood is now async to support Cloud API calls
+        evo2_score = await compute_real_evo2_likelihood(sequence)
+    except Exception as e:
+        log.warning(f"  Trajectory {trajectory_id}: Evo2 logic failed: {e}")
+        evo2_score = 0.0
 
     api_latency_ms = (time.time() - t0) * 1000
 
