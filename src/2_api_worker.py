@@ -522,8 +522,28 @@ async def run_api_worker(api_key: str):
     # Initialize database
     reward_model_name = os.environ.get("EVO2_MODEL_NAME", "evo2_7b")
     conn = init_database(DB_PATH)
+
+    # ── Dead Score Purger ──
+    # Validate the quality of existing scores. If standard deviation is ~0 for 
+    # foundation models, the previous run likely failed to load weights.
+    cursor = conn.execute(
+        "SELECT reward FROM experiences WHERE reward_model = ? LIMIT 100", 
+        (reward_model_name,)
+    )
+    existing_rewards = [row[0] for row in cursor.fetchall()]
+    
+    # If we have existing data but zero variance, it's fraudulent (failed model load)
+    if len(existing_rewards) >= 10 and np.std(existing_rewards) < 1e-7:
+        log.warning("=" * 70)
+        log.warning(f"[Purge] Detected 'Dead Scores' for {reward_model_name} (std=0).")
+        log.warning("[Purge] This confirms the previous run failed to load Evo2.")
+        log.warning("[Purge] Wiping broken scores to restore experimental rigor...")
+        log.warning("=" * 70)
+        conn.execute("DELETE FROM experiences WHERE reward_model = ?", (reward_model_name,))
+        conn.commit()
+
     scored_ids = get_scored_ids(conn, reward_model_name)
-    log.info(f"[Resume] {len(scored_ids)} trajectories already scored by '{reward_model_name}' in {DB_PATH}")
+    log.info(f"[Resume] {len(scored_ids)} valid trajectories already scored by '{reward_model_name}'")
 
     # Construct mock targets and mask for reward computation
     # In production, these would come from real GTEx data
