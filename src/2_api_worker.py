@@ -34,11 +34,16 @@ try:
 except ImportError:
     from unittest.mock import MagicMock
     _mock = MagicMock()
+    # Mock the base module and all possible internal/extension names
     sys.modules["flash_attn"] = _mock
+    sys.modules["flash_attn_2_cuda"] = _mock 
     sys.modules["flash_attn.flash_attn_interface"] = _mock
     sys.modules["flash_attn.bert_padding"] = _mock
     sys.modules["flash_attn.losses"] = _mock
     sys.modules["flash_attn.losses.cross_entropy"] = _mock
+    sys.modules["flash_attn.ops"] = _mock
+    sys.modules["flash_attn.ops.rms_norm"] = _mock
+    sys.modules["flash_attn.ops.layer_norm"] = _mock
 
 logging.basicConfig(
     level=logging.INFO,
@@ -211,11 +216,16 @@ def _get_evo2_model():
     # Device Selection
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # TPU Detection (via environment variables common in Colab/Kaggle TPU VMs)
-    is_tpu = any(k in os.environ for k in ["TPU_NAME", "TPU_ACCELERATOR_TYPE", "JAX_PLATFORMS"])
+    # TPU Detection (v5e-1 VMs and Colab TPU)
+    is_tpu = any(k in os.environ for k in [
+        "TPU_NAME", "TPU_ACCELERATOR_TYPE", "JAX_PLATFORMS", 
+        "KAGGLE_TPU_NAME", "COLAB_TPU_ADDR"
+    ]) or os.path.exists("/usr/lib64/libtpu.so") or os.path.exists("/usr/local/lib/libtpu.so")
+
     if is_tpu and device == "cpu":
-        log.info("[TPU/Hybrid] TPU detected. Offloading Evo2 foundation model to TPU VM CPU.")
-        log.info("[TPU/Hybrid] Performance Note: 7B CPU inference is memory-heavy. Using bfloat16.")
+        log.info("[TPU/Hybrid] TPU Environment Detected.")
+        log.info("[TPU/Hybrid] Offloading Evo2 foundation model to High-RAM TPU VM CPU.")
+        log.info("[TPU/Hybrid] Performance Note: Using bfloat16 for 7B foundation weights.")
     elif not torch.cuda.is_available() and not is_tpu:
         # Standard CPU-only fallback logic
         log.error("=" * 70)
