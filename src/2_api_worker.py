@@ -520,23 +520,42 @@ async def run_api_worker(api_key: str):
     log.info("[Validate] Sequence strings validated (ACGTN, correct length).")
 
     # Initialize database
-    reward_model_name = os.environ.get("EVO2_MODEL_NAME", "evo2_7b")
+    base_model_name = os.environ.get("EVO2_MODEL_NAME", "evo2_7b")
+    
+    # Provider-Aware Tagging: This forces re-scoring if hardware/provider changes
+    if base_model_name == "legacy_oracle":
+        reward_model_name = "legacy_oracle"
+    elif os.environ.get("NVIDIA_API_KEY"):
+        reward_model_name = f"{base_model_name}_cloud"
+    elif torch.cuda.is_available():
+        reward_model_name = f"{base_model_name}_cuda"
+    else:
+        reward_model_name = f"{base_model_name}_cpu"
+
     conn = init_database(DB_PATH)
 
-    # ── Dead Score Purger ──
-    # Validate the quality of existing scores. If standard deviation is ~0 for 
-    # foundation models, the previous run likely failed to load weights.
+    # ── Dead Score Purger & Force Override ──
+    # 1. Manual Force Override
+    if os.environ.get("FORCE_RESCORE") == "1":
+        log.warning(f"[Force] Wiping scores for {reward_model_name} as requested.")
+        conn.execute("DELETE FROM experiences WHERE reward_model = ?", (reward_model_name,))
+        conn.commit()
+
+    # 2. Automated Dead-Score Check
+    # Validate the quality of existing scores. If standard deviation is low, 
+    # the previous run likely failed to load weights or used a placeholder.
     cursor = conn.execute(
         "SELECT reward FROM experiences WHERE reward_model = ? LIMIT 100", 
         (reward_model_name,)
     )
     existing_rewards = [row[0] for row in cursor.fetchall()]
     
-    # If we have existing data but zero variance, it's fraudulent (failed model load)
-    if len(existing_rewards) >= 10 and np.std(existing_rewards) < 1e-7:
+    # Increased sensitivity (threshold 1e-4). Authentic biological rewards 
+    # should have significant variance.
+    if len(existing_rewards) >= 10 and np.std(existing_rewards) < 1e-4:
         log.warning("=" * 70)
-        log.warning(f"[Purge] Detected 'Dead Scores' for {reward_model_name} (std=0).")
-        log.warning("[Purge] This confirms the previous run failed to load Evo2.")
+        log.warning(f"[Purge] Detected 'Low Variance' scores for {reward_model_name}.")
+        log.warning("[Purge] Previous run likely used a fallback or placeholder.")
         log.warning("[Purge] Wiping broken scores to restore experimental rigor...")
         log.warning("=" * 70)
         conn.execute("DELETE FROM experiences WHERE reward_model = ?", (reward_model_name,))
