@@ -299,129 +299,158 @@ else:
 # ## 5. Stage 2 — AlphaGenome API Scoring
 
 # %%
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
-log = logging.getLogger("api")
-
-def init_database(db_path):
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS experiences (
-            trajectory_id INTEGER PRIMARY KEY,
-            actions BLOB NOT NULL,
-            forward_log_probs BLOB NOT NULL,
-            terminal_onehot BLOB NOT NULL,
-            reward REAL NOT NULL,
-            api_latency_ms REAL,
-            scored_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    return conn
-
-def get_scored_ids(conn):
-    return {r[0] for r in conn.execute("SELECT trajectory_id FROM experiences").fetchall()}
+# %% [markdown]
+# ## 5. Stage 2 — AlphaGenome & Evo2 Scoring
+#
+# Scoring DNA edits via the **AlphaGenome API** (chromatin accessibility) 
+# and the **Evo2 7B model** (biological likelihood).
+#
+# **Strict Mode**: If foundations fail, the trajectory is skipped to prevent placeholder pollution.
 
 # %%
-async def score_sequence(sequence, api_key, semaphore, traj_id):
-    """Query AlphaGenome API for DNASE predictions on a padded sequence."""
-    from alphagenome.models import dna_client
+import torch
+import aiohttp
 
+# ── Flash Attention Mocking (Colab T4 Compatibility) ──
+try:
+    import flash_attn
+except ImportError:
+    from unittest.mock import MagicMock
+    _mock = MagicMock()
+    sys.modules["flash_attn"] = _mock
+    sys.modules["flash_attn_2_cuda"] = _mock 
+    sys.modules["flash_attn.flash_attn_interface"] = _mock
+
+log = logging.getLogger("api")
+_api_client = None
+_evo2_model = None
+
+def _get_api_client(api_key):
+    global _api_client
+    if _api_client is None:
+        from alphagenome.models import dna_client
+        _api_client = dna_client.create(api_key)
+        print("[API] AlphaGenome DnaClient initialized.")
+    return _api_client
+
+def _get_evo2_model():
+    global _evo2_model
+    model_name = os.environ.get("EVO2_MODEL_NAME", "evo2_7b")
+    if model_name == "legacy_oracle": return "legacy_oracle"
+    
+    if _evo2_model is None:
+        try:
+            from evo2 import Evo2
+            print(f"[Evo2] Initializing: {model_name}")
+            # The Evo2 class handles device distribution internally.
+            _evo2_model = Evo2(model_name)
+            _evo2_model.eval()
+            print(f"[Evo2] Model {model_name} is LIVE.")
+        except Exception as e:
+            print(f"[Evo2] Init failed: {e}")
+            raise
+    return _evo2_model
+
+@torch.no_grad()
+async def compute_evo2_likelihood(sequence: str) -> float:
+    model = _get_evo2_model()
+    if model == "legacy_oracle":
+        return float(hash(sequence) % 1000) / 1000.0
+    try:
+        if hasattr(model, "score_sequence"):
+            return float(model.score_sequence(sequence))
+        raise AttributeError("Evo2 model missing 'score_sequence'")
+    except Exception as e:
+        raise RuntimeError(f"Evo2 Scoring Failed: {e}")
+
+async def score_trajectory(sequence, api_key, semaphore, traj_id):
+    """Query AlphaGenome and Evo2 for a single trajectory."""
+    from alphagenome.models import dna_client
+    
+    # 1. AlphaGenome API
+    ag_preds = None
     async with semaphore:
         for attempt in range(API_MAX_RETRIES):
             try:
                 loop = asyncio.get_event_loop()
                 def _predict():
-                    model = dna_client.create(api_key)
+                    model = _get_api_client(api_key)
                     padded = sequence + 'N' * (API_SEQ_LEN - len(sequence))
-                    outputs = model.predict_sequence(
-                        sequence=padded,
-                        requested_outputs=[dna_client.OutputType.DNASE],
-                        ontology_terms=None,
-                    )
-                    dnase = outputs.dnase
-                    if dnase is not None:
+                    out = model.predict_sequence(padded, [dna_client.OutputType.DNASE])
+                    if out.dnase is not None:
                         for attr in ['values', 'data', 'X']:
-                            if hasattr(dnase, attr):
-                                arr = np.array(getattr(dnase, attr), dtype=np.float32)
+                            if hasattr(out.dnase, attr):
+                                arr = np.array(getattr(out.dnase, attr), dtype=np.float32)
                                 return arr if arr.ndim >= 2 else arr[:, None]
                     return None
-
-                result = await loop.run_in_executor(None, _predict)
-                if result is not None:
-                    return result
+                ag_preds = await loop.run_in_executor(None, _predict)
+                if ag_preds is not None: break
             except Exception as e:
                 msg = str(e)
-                if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
-                    backoff = API_BASE_BACKOFF * (2 ** attempt)
-                    log.warning(f"  Traj {traj_id}: Rate limited, backoff {backoff:.0f}s")
-                    await asyncio.sleep(backoff)
+                if any(x in msg for x in ["429", "RESOURCE_EXHAUSTED"]):
+                    await asyncio.sleep(API_BASE_BACKOFF * (2**attempt))
                 else:
-                    log.error(f"  Traj {traj_id}: {msg[:120]}")
-                    return None
-        return None
+                    raise RuntimeError(f"AlphaGenome API Error: {msg[:100]}")
+    
+    if ag_preds is None: raise RuntimeError("AlphaGenome API returned None")
 
+    # 2. Evo2 Scoring
+    evo2_score = await compute_evo2_likelihood(sequence)
+    
+    return ag_preds, evo2_score
 
-async def run_scoring(sequences, actions_list, logprobs_list, onehot_list):
-    """Score all trajectories via the AlphaGenome API."""
+async def run_scoring_strict(sequences, actions_list, logprobs_list, onehot_list):
     conn = init_database(DB_PATH)
-    scored = get_scored_ids(conn)
-    pending = [(i, s) for i, s in enumerate(sequences) if i not in scored]
-    log.info(f"Scoring: {len(pending)} pending, {len(scored)} already done")
-
-    if not pending:
-        log.info("All trajectories already scored!")
-        conn.close()
-        return
+    scored_ids = {r[0] for r in conn.execute("SELECT trajectory_id FROM experiences").fetchall()}
+    pending = [(i, s) for i, s in enumerate(sequences) if i not in scored_ids]
+    
+    print(f"Scoring: {len(pending)} pending")
+    if not pending: return conn.close()
 
     semaphore = asyncio.Semaphore(API_CONCURRENCY)
-    scored_count, failed_count = len(scored), 0
+    scored, failed = 0, 0
     t0 = time.time()
 
-    # Process in small batches
-    for batch_start in range(0, len(pending), 50):
-        batch = pending[batch_start:batch_start + 50]
-        tasks = []
+    for batch_start in range(0, len(pending), 10):
+        batch = pending[batch_start:batch_start + 10]
+        tasks = [score_trajectory(s, ALPHA_GENOME_API_KEY, semaphore, i) for i, s in batch]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for traj_id, seq in batch:
-            tasks.append(score_sequence(seq, ALPHA_GENOME_API_KEY, semaphore, traj_id))
+        for (traj_id, seq), res in zip(batch, results):
+            if isinstance(res, Exception):
+                failed += 1
+                log.warning(f"  Traj {traj_id}: FAILED — {res}")
+                continue
+            
+            ag_preds, evo2_score = res
+            
+            # Weighted reward: R(x) = exp(-MSE) + β * likelihood
+            mse = float(np.mean(ag_preds ** 2))
+            reward = float(np.exp(-mse) + 0.1 * evo2_score)
+            reward = max(reward, 1e-8)
 
-        results = await asyncio.gather(*tasks)
+            conn.execute(
+                "INSERT OR REPLACE INTO experiences "
+                "(trajectory_id, actions, forward_log_probs, terminal_onehot, reward) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (traj_id, actions_list[traj_id].tobytes(),
+                 logprobs_list[traj_id].tobytes(),
+                 onehot_list[traj_id].tobytes(),
+                 reward),
+            )
+            conn.commit()
+            scored += 1
 
-        for (traj_id, seq), preds in zip(batch, results):
-            if preds is not None:
-                # Reward = exp(-MSE) where MSE is mean of DNASE predictions
-                # Higher DNASE signal = more chromatin accessibility = better
-                mse = float(np.mean(preds ** 2))
-                reward = float(np.exp(-mse) + 0.01 * np.mean(np.abs(preds)))
-                reward = max(reward, 1e-8)
+        if (batch_start + 10) % 50 == 0:
+            print(f"  [{batch_start+10}/{len(pending)}] processed | {failed} failures")
 
-                conn.execute(
-                    "INSERT OR REPLACE INTO experiences "
-                    "(trajectory_id, actions, forward_log_probs, terminal_onehot, reward, api_latency_ms) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (traj_id, actions_list[traj_id].tobytes(),
-                     logprobs_list[traj_id].tobytes(),
-                     onehot_list[traj_id].tobytes(),
-                     reward, (time.time() - t0) * 1000 / max(scored_count - len(scored) + 1, 1)),
-                )
-                conn.commit()
-                scored_count += 1
-            else:
-                failed_count += 1
-
-            if scored_count % 50 == 0:
-                elapsed = time.time() - t0
-                log.info(f"  [{scored_count}/{len(sequences)}] scored | "
-                         f"{failed_count} failed | {elapsed:.0f}s elapsed")
-
-    log.info(f"Scoring complete: {scored_count} scored, {failed_count} failed")
+    print(f"Scoring complete. Scored: {scored}, Failed: {failed}")
     conn.close()
 
 # %%
-# Run API scoring
-await run_scoring(all_seqs, all_actions, all_logprobs, all_onehot)
+# Run strict scoring
+await run_scoring_strict(all_seqs, all_actions, all_logprobs, all_onehot)
 
 # %% [markdown]
 # ## 6. Stage 3 — RBS Data Augmentation

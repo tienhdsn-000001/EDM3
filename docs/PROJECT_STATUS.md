@@ -42,7 +42,12 @@
 | RBS Augmentation | `4_rbs_augmenter.py` | 🟢 Verified | Top-10% mutation permutation, 1.5x multiplier |
 | Partial GFlowNet | `trajectory_sampler_v2.py` | 🟢 Done | 10kb window, 12.5× action space reduction |
 | Decoupled Notebooks | `nb_A, nb_B, nb_C` | 🟢 Done | Phase 6: 3 decoupled notebooks for strict GPU quota preservation |
-| Bash Pipeline | `run_overnight.sh` | 🟢 Done | Platform auto-detection, Secrets integration |
+
+### Phase 6: Scientific Rigor & Foundation Models
+  - Remediate Evo2 initialization `.to()` crash.
+  - Implement **Strict Reward Validation**: Fail trajectories on foundation errors.
+  - Synchronize SOTA fixes to Kaggle/Colab pipeline notebook.
+  - [Status: COMPLETED]
 
 ### Testing & Validation
 

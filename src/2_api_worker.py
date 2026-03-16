@@ -277,15 +277,13 @@ def _get_evo2_model():
             log.info(f"[Evo2] Initializing authentic model: {model_name}")
             log.info(f"[Evo2] Verification/Download phase started. This may take 5-10 minutes if not cached...")
             
-            # This call handles weight download/verification
+            # This call handles weight download/verification.
+            # IMPORTANT: The Evo2 class handles internal device mapping (cuda/cpu) via its config.
+            # Do NOT call .to() on the wrapper.
             _evo2_model = Evo2(model_name)
             
-            # Use bfloat16 for RAM efficiency on both T4 and TPU VM CPUs
-            dtype = torch.bfloat16
-            log.info(f"[Evo2] Weights verified. Moving to {device} ({dtype})...")
-            _evo2_model = _evo2_model.to(device, dtype=dtype)
             _evo2_model.eval()
-            log.info(f"[Evo2] Model {model_name} is LIVE on {device}.")
+            log.info(f"[Evo2] Model {model_name} is LIVE.")
         except Exception as e:
             log.error(f"[Evo2] Failed to initialize model: {e}")
             log.error("  Suggestion: Ensure your environment has sufficient RAM (24GB+ for 7B CPU).")
@@ -297,6 +295,8 @@ async def compute_real_evo2_likelihood(sequence: str) -> float:
     """
     Computes biological likelihood. Uses NVIDIA Hosted API if key is available,
     otherwise falls back to local (CPU/TPU-offloaded) inference.
+    
+    Strict Mode: Raises exception on failure rather than returning 0.0.
     """
     nv_key = os.environ.get("NVIDIA_API_KEY")
     if nv_key:
@@ -312,15 +312,12 @@ async def compute_real_evo2_likelihood(sequence: str) -> float:
     try:
         if hasattr(model, "score_sequence"):
             score = model.score_sequence(sequence)
+            return float(score)
         else:
-            # Fallback for alternative library method signatures
-            score = 0.0
+            raise AttributeError("Evo2 model object missing 'score_sequence' method.")
     except Exception as e:
-        log.error(f"[Evo2] Scoring failed: {e}")
-        score = 0.0
-
-    torch.cuda.empty_cache()
-    return float(score)
+        # Strict logic: Do NOT return 0.0 here. Let the caller decide if they want to fail the trajectory.
+        raise RuntimeError(f"Evo2 Scoring Failed: {e}")
 
 
 async def query_alphagenome_api(
@@ -450,45 +447,47 @@ async def process_trajectory(
         sequence, api_key, semaphore, trajectory_id
     )
 
+    if predictions is None:
+        stats["failed"] += 1
+        log.warning(f"  Trajectory {trajectory_id}: FAILED — No AlphaGenome API response.")
+        return
+
     # ── Real Evo2 7B Inference with VRAM Lock/Cloud Fallback ──
     try:
-        # Note: compute_real_evo2_likelihood is now async to support Cloud API calls
+        # Strict mode: this raises exception if foundation scoring fails
         evo2_score = await compute_real_evo2_likelihood(sequence)
     except Exception as e:
-        log.warning(f"  Trajectory {trajectory_id}: Evo2 logic failed: {e}")
-        evo2_score = 0.0
+        stats["failed"] += 1
+        log.warning(f"  Trajectory {trajectory_id}: FAILED — Foundation scoring error: {e}")
+        return
 
     api_latency_ms = (time.time() - t0) * 1000
 
-    if predictions is not None:
-        # Ensure shape compatibility
-        pred_bins = min(predictions.shape[0], targets.shape[0])
-        pred_tracks = min(predictions.shape[1] if predictions.ndim > 1 else 1, targets.shape[1])
+    # Ensure shape compatibility
+    pred_bins = min(predictions.shape[0], targets.shape[0])
+    pred_tracks = min(predictions.shape[1] if predictions.ndim > 1 else 1, targets.shape[1])
 
-        # Compute reward using the API predictions
-        reward = compute_reward_np(
-            predictions[:pred_bins, :pred_tracks],
-            targets[:pred_bins, :pred_tracks],
-            mask[:pred_bins, :pred_tracks],
-            evo2_score=evo2_score,
-            alpha=ALPHA_REWARD,
-            beta=BETA_REWARD,
+    # Compute reward using the API predictions
+    reward = compute_reward_np(
+        predictions[:pred_bins, :pred_tracks],
+        targets[:pred_bins, :pred_tracks],
+        mask[:pred_bins, :pred_tracks],
+        evo2_score=evo2_score,
+        alpha=ALPHA_REWARD,
+        beta=BETA_REWARD,
+    )
+
+    insert_experience(
+        conn, trajectory_id, actions, forward_log_probs,
+        reward, api_latency_ms, reward_model,
+    )
+
+    stats["scored"] += 1
+    if stats["scored"] % 50 == 0:
+        log.info(
+            f"  Progress: {stats['scored']}/{stats['total']} scored | "
+            f"Last reward: {reward:.6f} | API latency: {api_latency_ms:.0f}ms"
         )
-
-        insert_experience(
-            conn, trajectory_id, actions, forward_log_probs,
-            reward, api_latency_ms, reward_model,
-        )
-
-        stats["scored"] += 1
-        if stats["scored"] % 50 == 0:
-            log.info(
-                f"  Progress: {stats['scored']}/{stats['total']} scored | "
-                f"Last reward: {reward:.6f} | API latency: {api_latency_ms:.0f}ms"
-            )
-    else:
-        stats["failed"] += 1
-        log.warning(f"  Trajectory {trajectory_id}: FAILED — no API response.")
 
 
 async def run_api_worker(api_key: str):

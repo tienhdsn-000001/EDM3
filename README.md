@@ -106,6 +106,57 @@ bash run_overnight.sh
 
 ---
 
+## Phase 5: SOTA Architecture Integration (90% Complete)
+Integrated 2026-era GFlowNet methodologies:
+- **α-GFN Loss**: Tunable exploration/exploitation via $\alpha$ parameter.
+- **Sub-Trajectory EB (Sub-EB)**: Trajectory Balance using a learned Value head $V(s)$.
+- **Partial GFlowNet**: 10kb sliding windows for reduced action sparsity.
+- **RBS Augmentation**: Retrospective Backward Synthesis to hallucinate high-reward paths.
+
+## Phase 6: Scientific Rigor & Foundation Model Stability (ACTIVE)
+Addresses critical issues in foundation model integration:
+- **Evo2 Crash Remediation**: Fixed initialization logic to support authentic Evo2 7B in T4/TPU environments.
+- **Strict Reward Validation**: Trajectories now **fail loudly** on foundation model errors. This prevents "Low Variance" placeholder scores from polluting the dataset and causing false convergence.
+- **Foundation Fallbacks**:
+  - `export EVO2_MODEL_NAME=legacy_oracle`: Use a deterministic proxy for rapid loop testing.
+  - `export NVIDIA_API_KEY=...`: Use cloud-hosted Evo2 for high-rigor scoring without local VRAM limits.
+
+---
+
+## 🚀 Kaggle / Colab One-Shot Execution
+
+To run the full pipeline in a cloud environment:
+
+1.  **Open Notebook**: `notebooks/edm3_kaggle_pipeline.ipynb`
+2.  **Set Secret**: Add `ALPHA_GENOME_API_KEY` to Kaggle Secrets or Colab Userdata.
+3.  **Run All**: The notebook automatically handles:
+    - Dependency installation (JAX, Flax, AlphaGenome).
+    - Authentic Evo2 7B initialization.
+    - Sparse trajectory generation & API scoring.
+    - Offline α-GFN training with convergence detection.
+
+**One-Shot Shell Command (Kaggle/Local):**
+```bash
+# Upload project to /kaggle/working/EDM3
+cd /kaggle/working/EDM3
+./run_overnight.sh
+```
+
+---
+
+## Technical Metrics
+- **Sequence Length**: 100,000 bp (padded to 131,072 for API).
+- **Foundation Model**: Evo2 7B (Arc Architecture).
+- **Policy Size**: 34,136 parameters (Dual-head Conv1D).
+- **Reward Modality**: DNASE (Chromatin Accessibility).
+- **Convergence**: EMA Drop > 5% + Low Variance over 50 epochs.
+
+## Limitations
+- **API Quotas**: AlphaGenome API has strict rate limits. The pipeline uses exponential backoff.
+- **VRAM**: Evo2 7B requires 24GB+ RAM on CPU or a T4 GPU. Use `legacy_oracle` on restricted instances.
+
+---
+
 ## 5. March 2026 Benchmarks
 
 In our latest strictly validated execution run on a 16GB GPU:
