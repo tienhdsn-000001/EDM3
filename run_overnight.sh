@@ -23,6 +23,7 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
 
 # ── Platform Detection ────────────────────────────────────────
 if [ -d "/content" ]; then
