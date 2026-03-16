@@ -58,7 +58,7 @@ log = logging.getLogger("api_worker")
 
 INPUT_PATH = "data/unscored_trajectories.npz"
 DB_PATH = "data/experience_replay.db"
-MAX_CONCURRENCY = 2          # Reduced to avoid RESOURCE_EXHAUSTED on AlphaGenome
+MAX_CONCURRENCY = 1          # Forced to 1 for local Evo2 on T4/CPU to avoid OOM
 MAX_RETRIES = 12             # More retries for long overnight runs
 BASE_BACKOFF = 3.0           # Increased base backoff for gRPC stability
 ALPHA_REWARD = 1.0           # α in R(x) = exp(-α·L_mask) + β·log P_Evo
@@ -546,6 +546,10 @@ async def run_api_worker(api_key: str):
     else:
         reward_model_name = f"{base_model_name}_cpu"
 
+    # Set PyTorch memory allocator settings to reduce fragmentation
+    import os
+    os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+    
     conn = init_database(DB_PATH)
 
     # ── Dead Score Purger & Force Override ──
@@ -629,6 +633,10 @@ async def run_api_worker(api_key: str):
             tasks.append(task)
 
         await asyncio.gather(*tasks)
+        
+        # Explicitly clear cache after each batch to reclaim activation memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         elapsed = time.time() - t_start
         log.info(

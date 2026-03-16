@@ -36,6 +36,7 @@ IN_KAGGLE = os.environ.get('KAGGLE_KERNEL_RUN_TYPE') is not None
 IN_COLAB = 'google.colab' in sys.modules
 PLATFORM = "Kaggle" if IN_KAGGLE else ("Colab" if IN_COLAB else "Local")
 print(f"Platform: {PLATFORM}")
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # %%
 # Install core dependencies
@@ -101,7 +102,7 @@ ALPHA_GFN       = 0.5           # α-GFN mixing parameter
 
 # Pipeline settings
 NUM_TRAJECTORIES = 500          # Smaller batch for cloud GPU time limits
-API_CONCURRENCY  = 3            # Conservative for rate limits
+API_CONCURRENCY  = 1            # Forced to 1 for local Evo2 to avoid OOM
 API_MAX_RETRIES  = 8
 API_BASE_BACKOFF = 1.0
 TRAIN_EPOCHS     = 200
@@ -355,12 +356,11 @@ async def compute_evo2_likelihood(sequence: str) -> float:
     model = _get_evo2_model()
     if model == "legacy_oracle":
         return float(hash(sequence) % 1000) / 1000.0
-    try:
-        # According to official docs, we use the tokenizer and forward pass directly.
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
         
+    def _score(seq_to_score):
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
         input_ids = torch.tensor(
-            model.tokenizer.tokenize(sequence),
+            model.tokenizer.tokenize(seq_to_score),
             dtype=torch.int,
         ).unsqueeze(0).to(device)
         
@@ -375,9 +375,24 @@ async def compute_evo2_likelihood(sequence: str) -> float:
         # Mean log-likelihood
         loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        
         return -float(loss.cpu().item())
+
+    try:
+        return _score(sequence)
     except Exception as e:
+        if "CUDA out of memory" in str(e):
+            print(f"[Evo2] OOM on {len(sequence)}bp. Falling back to center 32k window...")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            # Center crop to 32,768 bp (biologically dense region in EDM3)
+            mid = len(sequence) // 2
+            start = max(0, mid - 16384)
+            end = min(len(sequence), mid + 16384)
+            windowed = sequence[start:end]
+            try:
+                return _score(windowed)
+            except Exception as e2:
+                raise RuntimeError(f"Evo2 Scoring Failed (Windowed): {e2}")
         raise RuntimeError(f"Evo2 Scoring Failed: {e}")
 
 async def score_trajectory(sequence, api_key, semaphore, traj_id):
@@ -433,6 +448,10 @@ async def run_scoring_strict(sequences, actions_list, logprobs_list, onehot_list
         tasks = [score_trajectory(s, ALPHA_GENOME_API_KEY, semaphore, i) for i, s in batch]
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Explicitly clear cache after each batch to reclaim activation memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         for (traj_id, seq), res in zip(batch, results):
             if isinstance(res, Exception):
