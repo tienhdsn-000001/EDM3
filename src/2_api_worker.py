@@ -277,12 +277,10 @@ def _get_evo2_model():
             log.info(f"[Evo2] Initializing authentic model: {model_name}")
             log.info(f"[Evo2] Verification/Download phase started. This may take 5-10 minutes if not cached...")
             
-            # This call handles weight download/verification.
-            # IMPORTANT: The Evo2 class handles internal device mapping (cuda/cpu) via its config.
-            # Do NOT call .to() on the wrapper.
+            # This call handles weight download/verification and internal device mapping.
+            # IMPORTANT: The Evo2 class handles internal device mapping. Do NOT call .to() or .eval().
             _evo2_model = Evo2(model_name)
             
-            _evo2_model.eval()
             log.info(f"[Evo2] Model {model_name} is LIVE.")
         except Exception as e:
             log.error(f"[Evo2] Failed to initialize model: {e}")
@@ -294,7 +292,7 @@ def _get_evo2_model():
 async def compute_real_evo2_likelihood(sequence: str) -> float:
     """
     Computes biological likelihood. Uses NVIDIA Hosted API if key is available,
-    otherwise falls back to local (CPU/TPU-offloaded) inference.
+    otherwise falls back to local forward pass.
     
     Strict Mode: Raises exception on failure rather than returning 0.0.
     """
@@ -306,17 +304,34 @@ async def compute_real_evo2_likelihood(sequence: str) -> float:
     
     # Handle Legacy Oracle mode
     if model == "legacy_oracle":
-        # Deterministic but non-uniform score for verification
         return float(hash(sequence) % 1000) / 1000.0
 
     try:
-        if hasattr(model, "score_sequence"):
-            score = model.score_sequence(sequence)
-            return float(score)
-        else:
-            raise AttributeError("Evo2 model object missing 'score_sequence' method.")
+        # According to official docs, we use the tokenizer and forward pass directly.
+        # Note: 100kb sequences are large. We move to GPU only for the inference.
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        
+        input_ids = torch.tensor(
+            model.tokenizer.tokenize(sequence),
+            dtype=torch.int,
+        ).unsqueeze(0).to(device)
+        
+        # Forward pass: returns (logits, embeddings)
+        outputs, _ = model(input_ids)
+        logits = outputs[0]  # Shape: [1, seq_len, vocab]
+        
+        # Standard Next-Token Prediction Log-Likelihood
+        # Shift logits and targets to align: logits[i] predicts input_ids[i+1]
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = input_ids[:, 1:].contiguous()
+        
+        # Mean log-likelihood (negative cross entropy)
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        
+        return -float(loss.cpu().item())
+        
     except Exception as e:
-        # Strict logic: Do NOT return 0.0 here. Let the caller decide if they want to fail the trajectory.
         raise RuntimeError(f"Evo2 Scoring Failed: {e}")
 
 
