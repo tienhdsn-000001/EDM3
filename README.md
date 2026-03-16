@@ -151,9 +151,26 @@ cd /kaggle/working/EDM3
 - **Reward Modality**: DNASE (Chromatin Accessibility).
 - **Convergence**: EMA Drop > 5% + Low Variance over 50 epochs.
 
-## Limitations
 - **API Quotas**: AlphaGenome API has strict rate limits. The pipeline uses exponential backoff.
-- **VRAM**: Evo2 7B requires 24GB+ RAM on CPU or a T4 GPU. Use `legacy_oracle` on restricted instances.
+- **VRAM**: Evo2 7B requires 24GB+ RAM on CPU or a T4 GPU. 
+
+### ⚙️ Running on CPU (When GPU quota is exhausted)
+If you are out of T4 GPU resources on Kaggle/Colab, the local Evo2 7B model will be too slow or OOM on system RAM. Use one of these two configurations:
+
+1.  **Production Rigor (Cloud Offloading)**:
+    Get a free trial API key from [NVIDIA NIM](https://build.nvidia.com/arc/evo2-7b).
+    ```bash
+    export NVIDIA_API_KEY="your_nvidia_key"
+    bash run_overnight.sh
+    ```
+    This offloads the 7B scoring to NVIDIA's infrastructure (takes <1s/seq) and works perfectly on CPU-only instances.
+
+2.  **Development/Loop Testing (Local Mocking)**:
+    ```bash
+    export EVO2_MODEL_NAME="legacy_oracle"
+    bash run_overnight.sh
+    ```
+    This uses a deterministic hardware-independent mock score. It is ultra-fast and uses negligible memory, but does not provide biological likelihood regularization.
 
 ---
 

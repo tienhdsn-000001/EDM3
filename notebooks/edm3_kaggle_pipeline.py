@@ -326,6 +326,35 @@ log = logging.getLogger("api")
 _api_client = None
 _evo2_model = None
 
+async def _query_nvidia_hosted_evo2(sequence: str, api_key: str) -> float:
+    """Queries the NVIDIA Hosted API for high-rigor biological scores."""
+    url = "https://health.api.nvidia.com/v1/biology/arc/evo2-7b/generate"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "sequence": sequence,
+        "num_tokens": 1,
+        "top_k": 1,
+        "enable_sampled_probs": True
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    if "probabilities" in result and len(result["probabilities"]) > 0:
+                        return float(result["probabilities"][0])
+                    return 0.0
+                else:
+                    text = await resp.text()
+                    print(f"[Evo2/Cloud] API Error {resp.status}: {text[:100]}")
+                    return 0.0
+    except Exception as e:
+        print(f"[Evo2/Cloud] Request failed: {e}")
+        return 0.0
+
 def _get_api_client(api_key):
     global _api_client
     if _api_client is None:
@@ -339,11 +368,23 @@ def _get_evo2_model():
     model_name = os.environ.get("EVO2_MODEL_NAME", "evo2_7b")
     if model_name == "legacy_oracle": return "legacy_oracle"
     
+    # Device Detection
+    has_gpu = torch.cuda.is_available()
+    if not has_gpu and not os.environ.get("NVIDIA_API_KEY"):
+        print("=" * 70)
+        print("[CRITICAL] NO GPU DETECTED")
+        print("The Evo2 7B model requires hardware acceleration (GPU).")
+        print("Running on CPU will be extremely slow (mins/seq) and likely OOM.")
+        print("Options:")
+        print("  1. Use NVIDIA Hosted API: export NVIDIA_API_KEY=...")
+        print("  2. Use Legacy Oracle (Mock): export EVO2_MODEL_NAME=legacy_oracle")
+        print("=" * 70)
+        raise RuntimeError("GPU required for local Evo2. Use Cloud API or Oracle instead.")
+
     if _evo2_model is None:
         try:
             from evo2 import Evo2
             print(f"[Evo2] Initializing: {model_name}")
-            # The Evo2 class handles internal device mapping. Do NOT call .to() or .eval().
             _evo2_model = Evo2(model_name)
             print(f"[Evo2] Model {model_name} is LIVE.")
         except Exception as e:
@@ -353,6 +394,12 @@ def _get_evo2_model():
 
 @torch.no_grad()
 async def compute_evo2_likelihood(sequence: str) -> float:
+    # 1. Check Cloud Offloading
+    nv_key = os.environ.get("NVIDIA_API_KEY")
+    if nv_key:
+        return await _query_nvidia_hosted_evo2(sequence, nv_key)
+
+    # 2. Local/Oracle Scoring
     model = _get_evo2_model()
     if model == "legacy_oracle":
         return float(hash(sequence) % 1000) / 1000.0
