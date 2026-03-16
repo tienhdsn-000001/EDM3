@@ -342,9 +342,8 @@ def _get_evo2_model():
         try:
             from evo2 import Evo2
             print(f"[Evo2] Initializing: {model_name}")
-            # The Evo2 class handles device distribution internally.
+            # The Evo2 class handles internal device mapping. Do NOT call .to() or .eval().
             _evo2_model = Evo2(model_name)
-            _evo2_model.eval()
             print(f"[Evo2] Model {model_name} is LIVE.")
         except Exception as e:
             print(f"[Evo2] Init failed: {e}")
@@ -357,9 +356,27 @@ async def compute_evo2_likelihood(sequence: str) -> float:
     if model == "legacy_oracle":
         return float(hash(sequence) % 1000) / 1000.0
     try:
-        if hasattr(model, "score_sequence"):
-            return float(model.score_sequence(sequence))
-        raise AttributeError("Evo2 model missing 'score_sequence'")
+        # According to official docs, we use the tokenizer and forward pass directly.
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        
+        input_ids = torch.tensor(
+            model.tokenizer.tokenize(sequence),
+            dtype=torch.int,
+        ).unsqueeze(0).to(device)
+        
+        # Forward pass: returns (logits, embeddings)
+        outputs, _ = model(input_ids)
+        logits = outputs[0]  # Shape: [1, seq_len, vocab]
+        
+        # Shift logits and targets to align
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = input_ids[:, 1:].contiguous()
+        
+        # Mean log-likelihood
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        
+        return -float(loss.cpu().item())
     except Exception as e:
         raise RuntimeError(f"Evo2 Scoring Failed: {e}")
 
