@@ -306,13 +306,10 @@ async def compute_real_evo2_likelihood(sequence: str) -> float:
     if model == "legacy_oracle":
         return float(hash(sequence) % 1000) / 1000.0
 
-    try:
-        # According to official docs, we use the tokenizer and forward pass directly.
-        # Note: 100kb sequences are large. We move to GPU only for the inference.
+    def _score(seq_to_score):
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        
         input_ids = torch.tensor(
-            model.tokenizer.tokenize(sequence),
+            model.tokenizer.tokenize(seq_to_score),
             dtype=torch.int,
         ).unsqueeze(0).to(device)
         
@@ -320,18 +317,33 @@ async def compute_real_evo2_likelihood(sequence: str) -> float:
         outputs, _ = model(input_ids)
         logits = outputs[0]  # Shape: [1, seq_len, vocab]
         
-        # Standard Next-Token Prediction Log-Likelihood
-        # Shift logits and targets to align: logits[i] predicts input_ids[i+1]
+        # Shift logits and targets to align
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = input_ids[:, 1:].contiguous()
         
-        # Mean log-likelihood (negative cross entropy)
+        # Mean log-likelihood
         loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        
         return -float(loss.cpu().item())
-        
+
+    try:
+        return _score(sequence)
     except Exception as e:
+        if "CUDA out of memory" in str(e):
+            log.warning(f"[Evo2] OOM on {len(sequence)}bp. Falling back to center 32k window...")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Center crop to 32,768 bp (biologically dense region in EDM3)
+            mid = len(sequence) // 2
+            start = max(0, mid - 16384)
+            end = min(len(sequence), mid + 16384)
+            windowed = sequence[start:end]
+            
+            try:
+                return _score(windowed)
+            except Exception as e2:
+                raise RuntimeError(f"Evo2 Scoring Failed (Windowed): {e2}")
         raise RuntimeError(f"Evo2 Scoring Failed: {e}")
 
 
