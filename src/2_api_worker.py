@@ -559,7 +559,6 @@ async def run_api_worker(api_key: str):
         reward_model_name = f"{base_model_name}_cpu"
 
     # Set PyTorch memory allocator settings to reduce fragmentation
-    import os
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
     
     conn = init_database(DB_PATH)
