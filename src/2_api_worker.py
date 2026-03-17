@@ -27,24 +27,8 @@ import torch
 import numpy as np
 from typing import Optional
 
-# ── Flash Attention Mocking (Colab T4/CPU Compatibility) ──────
-# The evo2 library hard-imports flash_attn which often fails to compile in Colab.
-# We mock it here to force the library to fall back to native PyTorch SDPA.
-try:
-    import flash_attn
-except ImportError:
-    from unittest.mock import MagicMock
-    _mock = MagicMock()
-    # Mock the base module and all possible internal/extension names
-    sys.modules["flash_attn"] = _mock
-    sys.modules["flash_attn_2_cuda"] = _mock 
-    sys.modules["flash_attn.flash_attn_interface"] = _mock
-    sys.modules["flash_attn.bert_padding"] = _mock
-    sys.modules["flash_attn.losses"] = _mock
-    sys.modules["flash_attn.losses.cross_entropy"] = _mock
-    sys.modules["flash_attn.ops"] = _mock
-    sys.modules["flash_attn.ops.rms_norm"] = _mock
-    sys.modules["flash_attn.ops.layer_norm"] = _mock
+# --- Biological Prior: Nucleotide Transformer (T4 Compatible) ---
+from transformers import AutoTokenizer, AutoModelForMaskedLM
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,11 +43,12 @@ log = logging.getLogger("api_worker")
 
 INPUT_PATH = "data/unscored_trajectories.npz"
 DB_PATH = "data/experience_replay.db"
-MAX_CONCURRENCY = 1          # Forced to 1 for local Evo2 on T4/CPU to avoid OOM
+MAX_CONCURRENCY = 2          # NT 500M is lightweight enough for concurrency 2 on T4
 MAX_RETRIES = 12             # More retries for long overnight runs
 BASE_BACKOFF = 3.0           # Increased base backoff for gRPC stability
-ALPHA_REWARD = 1.0           # α in R(x) = exp(-α·L_mask) + β·log P_Evo
-BETA_REWARD = 0.1            # β weight on Evo2 term
+ALPHA_REWARD = 1.0           # α in R(x) = exp(-α·L_mask) + β·log P_Prior
+BETA_REWARD = 0.1            # β weight on Bio-Prior term
+PRIOR_MODEL_NAME = "InstaDeepAI/nucleotide-transformer-500m-human-ref"
 
 # AlphaGenome prediction parameters
 # IMPORTANT: AlphaGenome only supports specific lengths: [16384, 131072, 524288, 1048576]
@@ -167,16 +152,16 @@ def compute_reward_np(
     ag_predictions: np.ndarray,
     targets: np.ndarray,
     mask: np.ndarray,
-    evo2_score: float = 0.0,
+    prior_score: float = 0.0,
     alpha: float = 1.0,
     beta: float = 0.1,
 ) -> float:
     """
-    R(x) = exp(-α · L_mask) + β · log P_Evo(x)
-    Pure numpy. Evo2 score defaults to 0 when not available from API.
+    R(x) = exp(-α · L_mask) + β · PriorScore(x)
+    Pure numpy. Prior score defaults to 0 when not available.
     """
     l_mask = masked_modality_loss_np(ag_predictions, targets, mask)
-    reward = np.exp(-alpha * l_mask) + beta * evo2_score
+    reward = np.exp(-alpha * l_mask) + beta * prior_score
     return float(max(reward, 1e-8))
 
 
@@ -198,182 +183,67 @@ def _get_api_client(api_key: str):
 
 
 # ---------------------------------------------------------------------------
-# Evo2 Foundation Model Integration
+# Biological Prior: Nucleotide Transformer
 # ---------------------------------------------------------------------------
 
-import aiohttp
+_prior_model = None
+_prior_tokenizer = None
+prior_lock = asyncio.Lock()
 
-_evo2_model = None
-evo2_lock = asyncio.Lock()
-_last_successful_window = None # Global sticky window state
-
-async def _query_nvidia_hosted_evo2(sequence: str, api_key: str) -> float:
-    """Queries the NVIDIA Hosted API for high-rigor biological scores."""
-    url = "https://health.api.nvidia.com/v1/biology/arc/evo2-7b/generate"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "sequence": sequence,
-        "num_tokens": 1,
-        "top_k": 1,
-        "enable_sampled_probs": True
-    }
+def _get_prior_resources():
+    """Loads the Nucleotide Transformer 500M in float16 for T4 efficiency."""
+    global _prior_model, _prior_tokenizer
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    # We use the log-probability of the first token as the "likelihood" score
-                    # This is analogous to our local score_sequence logic.
-                    if "probabilities" in result and len(result["probabilities"]) > 0:
-                        return float(result["probabilities"][0])
-                    return 0.0
-                else:
-                    text = await resp.text()
-                    log.warning(f"[Evo2/Cloud] API Error {resp.status}: {text[:100]}")
-                    return 0.0
-    except Exception as e:
-        log.warning(f"[Evo2/Cloud] Request failed: {e}")
-        return 0.0
-
-
-def _get_evo2_model():
-    """Loads the authentic Evo2 7B model in bfloat16 for Colab T4 compatibility."""
-    global _evo2_model
-    
-    model_name = os.environ.get("EVO2_MODEL_NAME", "evo2_7b")
-    
-    # Handle Legacy Oracle mode (CPU Friendly)
-    if model_name == "legacy_oracle":
-        return "legacy_oracle"
-
-    # Device Selection
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # TPU Detection (v5e-1 VMs and Colab TPU)
-    is_tpu = any(k in os.environ for k in [
-        "TPU_NAME", "TPU_ACCELERATOR_TYPE", "JAX_PLATFORMS", 
-        "KAGGLE_TPU_NAME", "COLAB_TPU_ADDR"
-    ]) or os.path.exists("/usr/lib64/libtpu.so") or os.path.exists("/usr/local/lib/libtpu.so")
-
-    if is_tpu and device == "cpu":
-        log.info("[TPU/Hybrid] TPU Environment Detected.")
-        log.info("[TPU/Hybrid] Offloading Evo2 foundation model to High-RAM TPU VM CPU.")
-        log.info("[TPU/Hybrid] Performance Note: Using bfloat16 for 7B foundation weights.")
-    elif not torch.cuda.is_available() and not is_tpu:
-        # Standard CPU-only fallback logic
-        log.error("=" * 70)
-        log.error("[CRITICAL] NO GPU OR TPU DETECTED")
-        log.error("The Evo2 7B model requires hardware acceleration.")
-        log.error("If you are on a restricted CPU instance, switch to the oracle:")
-        log.error("  export EVO2_MODEL_NAME=legacy_oracle")
-        log.error("=" * 70)
-        raise RuntimeError("Hardware acceleration required for Evo2. Switch to legacy_oracle if necessary.")
-
-    if _evo2_model is None:
+    if _prior_model is None:
         try:
-            from evo2 import Evo2
-            log.info(f"[Evo2] Initializing authentic model: {model_name}")
-            log.info(f"[Evo2] Verification/Download phase started. This may take 5-10 minutes if not cached...")
-            
-            # This call handles weight download/verification and internal device mapping.
-            # IMPORTANT: The Evo2 class handles internal device mapping. 
-            # We pass device explicitly to override if forced to CPU.
-            _evo2_model = Evo2(model_name, device=device)
-            
-            log.info(f"[Evo2] Model {model_name} is LIVE.")
+            log.info(f"[Prior] Loading Nucleotide Transformer: {PRIOR_MODEL_NAME}")
+            _prior_tokenizer = AutoTokenizer.from_pretrained(PRIOR_MODEL_NAME)
+            _prior_model = AutoModelForMaskedLM.from_pretrained(
+                PRIOR_MODEL_NAME,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            ).to(device)
+            _prior_model.eval()
+            log.info("[Prior] Nucleotide Transformer is LIVE.")
         except Exception as e:
-            log.error(f"[Evo2] Failed to initialize model: {e}")
-            log.error("  Suggestion: Ensure your environment has sufficient RAM (24GB+ for 7B CPU).")
+            log.error(f"[Prior] Failed to load model: {e}")
             raise
-    return _evo2_model
+    return _prior_model, _prior_tokenizer
+
 
 @torch.no_grad()
-async def compute_real_evo2_likelihood(sequence: str) -> float:
+async def compute_biological_prior_score(sequence: str) -> float:
     """
-    Computes biological likelihood. Uses NVIDIA Hosted API if key is available,
-    otherwise falls back to local forward pass.
-    
-    Strict Mode: Raises exception on failure rather than returning 0.0.
+    Computes biological viability using a sliding window approach with NT 500M.
+    Returns the average log-likelihood (Negative Cross Entropy).
     """
-    nv_key = os.environ.get("NVIDIA_API_KEY")
-    if nv_key:
-        return await _query_nvidia_hosted_evo2(sequence, nv_key)
-
-    model = _get_evo2_model()
+    model, tokenizer = _get_prior_resources()
+    device = next(model.parameters()).device
     
-    # Handle Legacy Oracle mode
-    if model == "legacy_oracle":
-        return float(hash(sequence) % 1000) / 1000.0
-
-    def _score(seq_to_score):
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        input_ids = torch.tensor(
-            model.tokenizer.tokenize(seq_to_score),
-            dtype=torch.int,
-        ).unsqueeze(0).to(device)
-        
-        # Forward pass: returns (logits, embeddings)
-        outputs, _ = model(input_ids)
-        logits = outputs[0]  # Shape: [1, seq_len, vocab]
-        
-        # Shift logits and targets to align
-        shift_logits = logits[:, :-1, :].contiguous()
-        shift_labels = input_ids[:, 1:].contiguous()
-        
-        # Mean log-likelihood
-        loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
-        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        return -float(loss.cpu().item())
-
-    global _last_successful_window
+    # NT 500M Context is 1024 tokens. 6-mers means ~6kb bp.
+    # We use 5000 bp windows to be safe and avoid edge issues.
+    window_size = 5000
+    stride = 4000
     
-    try:
-        # If we have a sticky window from a previous OOM in this session, use it immediately
-        if _last_successful_window and len(sequence) > _last_successful_window:
-            start = max(0, (len(sequence) // 2) - (_last_successful_window // 2))
-            windowed = sequence[start : start + _last_successful_window]
-            return _score(windowed)
-            
-        return _score(sequence)
-    except Exception as e:
-        if "CUDA out of memory" in str(e):
-            # Tiered fallback to ensure we get a score even on restricted hardware (T4)
-            # Added 1024 as the last resort before absolute failure.
-            windows = [32768, 16384, 8192, 4096, 1024]
-            
-            for win_size in windows:
-                if len(sequence) <= win_size:
-                    continue
-                    
-                log.warning(f"[Evo2] OOM. Retrying with center {win_size}bp window...")
-                
-                # Aggressive memory reclamation
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                # Center crop to dense region
-                mid = len(sequence) // 2
-                start = max(0, mid - (win_size // 2))
-                end = min(len(sequence), mid + (win_size // 2))
-                windowed = sequence[start:end]
-                
-                try:
-                    score = _score(windowed)
-                    # Update sticky window to avoid future OOM attempts this session
-                    _last_successful_window = win_size
-                    return score
-                except Exception as e2:
-                    if "CUDA out of memory" in str(e2):
-                        continue # Try next smaller window
-                    raise RuntimeError(f"Evo2 Scoring Failed (Windowed {win_size}): {e2}")
-            
-            raise RuntimeError(f"Evo2 Scoring Failed: All tiered windows failed with OOM.")
-        raise RuntimeError(f"Evo2 Scoring Failed: {e}")
+    scores = []
+    
+    # Process sequence in chunks
+    for i in range(0, len(sequence), stride):
+        chunk = sequence[i : i + window_size]
+        if len(chunk) < 6: break # Tokenizer needs enough bp for at least one 6-mer
+        
+        inputs = tokenizer(chunk, return_tensors="pt").to(device)
+        # Use labels=input_ids to compute cross-entropy loss relative to the real sequence
+        outputs = model(**inputs, labels=inputs["input_ids"])
+        
+        # Log-likelihood is negative loss
+        ll = -float(outputs.loss.cpu().item())
+        scores.append(ll)
+        
+        if len(sequence) <= window_size: break
+        
+    return float(np.mean(scores)) if scores else 0.0
 
 
 async def query_alphagenome_api(
@@ -508,13 +378,12 @@ async def process_trajectory(
         log.warning(f"  Trajectory {trajectory_id}: FAILED — No AlphaGenome API response.")
         return
 
-    # ── Real Evo2 7B Inference with VRAM Lock/Cloud Fallback ──
+    # ── Foundation Model Prior (Nucleotide Transformer) ──
     try:
-        # Strict mode: this raises exception if foundation scoring fails
-        evo2_score = await compute_real_evo2_likelihood(sequence)
+        prior_score = await compute_biological_prior_score(sequence)
     except Exception as e:
         stats["failed"] += 1
-        log.warning(f"  Trajectory {trajectory_id}: FAILED — Foundation scoring error: {e}")
+        log.warning(f"  Trajectory {trajectory_id}: FAILED — Prior scoring error: {e}")
         return
 
     api_latency_ms = (time.time() - t0) * 1000
@@ -528,7 +397,7 @@ async def process_trajectory(
         predictions[:pred_bins, :pred_tracks],
         targets[:pred_bins, :pred_tracks],
         mask[:pred_bins, :pred_tracks],
-        evo2_score=evo2_score,
+        prior_score=prior_score,
         alpha=ALPHA_REWARD,
         beta=BETA_REWARD,
     )
@@ -575,17 +444,7 @@ async def run_api_worker(api_key: str):
     log.info("[Validate] Sequence strings validated (ACGTN, correct length).")
 
     # Initialize database
-    base_model_name = os.environ.get("EVO2_MODEL_NAME", "evo2_7b")
-    
-    # Provider-Aware Tagging: This forces re-scoring if hardware/provider changes
-    if base_model_name == "legacy_oracle":
-        reward_model_name = "legacy_oracle"
-    elif os.environ.get("NVIDIA_API_KEY"):
-        reward_model_name = f"{base_model_name}_cloud"
-    elif torch.cuda.is_available():
-        reward_model_name = f"{base_model_name}_cuda"
-    else:
-        reward_model_name = f"{base_model_name}_cpu"
+    reward_model_name = "nucleotide_transformer_500m"
 
     # Set PyTorch memory allocator settings to reduce fragmentation
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
