@@ -17,6 +17,7 @@ Features:
 
 import os
 import sys
+import gc
 import json
 import time
 import sqlite3
@@ -330,20 +331,34 @@ async def compute_real_evo2_likelihood(sequence: str) -> float:
         return _score(sequence)
     except Exception as e:
         if "CUDA out of memory" in str(e):
-            log.warning(f"[Evo2] OOM on {len(sequence)}bp. Falling back to center 32k window...")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Tiered fallback to ensure we get a score even on restricted hardware (T4)
+            windows = [32768, 16384, 8192, 4096]
             
-            # Center crop to 32,768 bp (biologically dense region in EDM3)
-            mid = len(sequence) // 2
-            start = max(0, mid - 16384)
-            end = min(len(sequence), mid + 16384)
-            windowed = sequence[start:end]
+            for win_size in windows:
+                if len(sequence) <= win_size:
+                    continue
+                    
+                log.warning(f"[Evo2] OOM. Retrying with center {win_size//1000}k window...")
+                
+                # Aggressive memory reclamation
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Center crop to dense region
+                mid = len(sequence) // 2
+                start = max(0, mid - (win_size // 2))
+                end = min(len(sequence), mid + (win_size // 2))
+                windowed = sequence[start:end]
+                
+                try:
+                    return _score(windowed)
+                except Exception as e2:
+                    if "CUDA out of memory" in str(e2):
+                        continue # Try next smaller window
+                    raise RuntimeError(f"Evo2 Scoring Failed (Windowed {win_size}): {e2}")
             
-            try:
-                return _score(windowed)
-            except Exception as e2:
-                raise RuntimeError(f"Evo2 Scoring Failed (Windowed): {e2}")
+            raise RuntimeError(f"Evo2 Scoring Failed: All tiered windows failed with OOM.")
         raise RuntimeError(f"Evo2 Scoring Failed: {e}")
 
 
