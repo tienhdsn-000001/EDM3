@@ -157,12 +157,13 @@ def compute_reward_np(
     beta: float = 0.1,
 ) -> float:
     """
-    R(x) = exp(-α · L_mask) + β · PriorScore(x)
-    Pure numpy. Prior score defaults to 0 when not available.
+    R(x) = exp(-α · L_mask + β · PriorScore)
+    Standard exponential formulation for biological rewards.
     """
     l_mask = masked_modality_loss_np(ag_predictions, targets, mask)
-    reward = np.exp(-alpha * l_mask) + beta * prior_score
-    return float(max(reward, 1e-8))
+    # We combine the penalties in the exponent to preserve gradient variance
+    reward = np.exp(-alpha * l_mask + beta * prior_score)
+    return float(max(reward, 1e-12))
 
 
 # ---------------------------------------------------------------------------
@@ -215,35 +216,41 @@ def _get_prior_resources():
 @torch.no_grad()
 async def compute_biological_prior_score(sequence: str) -> float:
     """
-    Computes biological viability using a sliding window approach with NT 500M.
-    Returns the average log-likelihood (Negative Cross Entropy).
+    Computes biological viability using a batched sliding window with NT 500M.
+    Strict asyncio locking prevents GPU contention.
     """
-    model, tokenizer = _get_prior_resources()
-    device = next(model.parameters()).device
-    
-    # NT 500M Context is 1024 tokens. 6-mers means ~6kb bp.
-    # We use 5000 bp windows to be safe and avoid edge issues.
-    window_size = 5000
-    stride = 4000
-    
-    scores = []
-    
-    # Process sequence in chunks
-    for i in range(0, len(sequence), stride):
-        chunk = sequence[i : i + window_size]
-        if len(chunk) < 6: break # Tokenizer needs enough bp for at least one 6-mer
+    async with prior_lock:
+        model, tokenizer = _get_prior_resources()
+        device = next(model.parameters()).device
         
-        inputs = tokenizer(chunk, return_tensors="pt").to(device)
-        # Use labels=input_ids to compute cross-entropy loss relative to the real sequence
-        outputs = model(**inputs, labels=inputs["input_ids"])
+        window_size = 5000
+        stride = 4000
+        batch_size = 8 # Batch windows together for T4 parallel speedup
         
-        # Log-likelihood is negative loss
-        ll = -float(outputs.loss.cpu().item())
-        scores.append(ll)
+        chunks = []
+        for i in range(0, len(sequence), stride):
+            chunk = sequence[i : i + window_size]
+            if len(chunk) < 6: break
+            chunks.append(chunk)
+            if len(sequence) <= window_size: break
         
-        if len(sequence) <= window_size: break
+        if not chunks: return 0.0
         
-    return float(np.mean(scores)) if scores else 0.0
+        all_losses = []
+        # Process chunks in sub-batches
+        for i in range(0, len(chunks), batch_size):
+            sub_batch = chunks[i : i + batch_size]
+            inputs = tokenizer(sub_batch, return_tensors="pt", padding=True, truncation=True).to(device)
+            # labels=input_ids for perplexity-style scoring
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            
+            # CE loss is averaged over the batch by default in Transformers
+            # But we want individual scores for better averaging if batch size varies
+            # NT 500M logic: loss is returned as a scalar (mean)
+            all_losses.append(float(outputs.loss.cpu().item()))
+            
+        # Prior score is negative cross-entropy (log-likelihood)
+        return -float(np.mean(all_losses))
 
 
 async def query_alphagenome_api(
@@ -369,24 +376,28 @@ async def process_trajectory(
     """Processes a single trajectory: API call → reward → SQLite insert."""
     t0 = time.time()
 
+    api_start = time.time()
     predictions = await query_alphagenome_api(
         sequence, api_key, semaphore, trajectory_id
     )
-
+    api_time = (time.time() - api_start) * 1000
+    
     if predictions is None:
         stats["failed"] += 1
         log.warning(f"  Trajectory {trajectory_id}: FAILED — No AlphaGenome API response.")
         return
 
     # ── Foundation Model Prior (Nucleotide Transformer) ──
+    gpu_start = time.time()
     try:
         prior_score = await compute_biological_prior_score(sequence)
     except Exception as e:
         stats["failed"] += 1
         log.warning(f"  Trajectory {trajectory_id}: FAILED — Prior scoring error: {e}")
         return
+    gpu_time = (time.time() - gpu_start) * 1000
 
-    api_latency_ms = (time.time() - t0) * 1000
+    total_latency_ms = (time.time() - t0) * 1000
 
     # Ensure shape compatibility
     pred_bins = min(predictions.shape[0], targets.shape[0])
@@ -404,14 +415,14 @@ async def process_trajectory(
 
     insert_experience(
         conn, trajectory_id, actions, forward_log_probs,
-        reward, api_latency_ms, reward_model,
+        reward, total_latency_ms, reward_model,
     )
 
     stats["scored"] += 1
-    if stats["scored"] % 50 == 0:
+    if stats["scored"] % 25 == 0:
         log.info(
             f"  Progress: {stats['scored']}/{stats['total']} scored | "
-            f"Last reward: {reward:.6f} | API latency: {api_latency_ms:.0f}ms"
+            f"Reward: {reward:.6f} | API: {api_time/1000:.1f}s | GPU: {gpu_time/1000:.1f}s"
         )
 
 
