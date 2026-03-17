@@ -37,6 +37,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("api_worker")
 
+# ── Pre-emptive VRAM Clearance (Step 1 JAX/XLA leftovers) ──
+if torch.cuda.is_available():
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    # Log initial state
+    _total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    _free = torch.cuda.mem_get_info()[0] / (1024**3)
+    log.info(f"[Memory] System Startup | Free: {_free:.2f}GB / {_total:.2f}GB")
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -191,22 +201,42 @@ _prior_model = None
 _prior_tokenizer = None
 prior_lock = asyncio.Lock()
 
+def _log_gpu_memory(label: str):
+    """Logs the current GPU memory usage."""
+    if not torch.cuda.is_available():
+        return
+    allocated = torch.cuda.memory_allocated() / (1024**3)
+    reserved = torch.cuda.memory_reserved() / (1024**3)
+    log.info(f"[Memory] {label} | Allocated: {allocated:.2f}GB | Reserved: {reserved:.2f}GB")
+
 def _get_prior_resources():
-    """Loads the Nucleotide Transformer 500M in float16 for T4 efficiency."""
+    """Loads the Nucleotide Transformer 500M. Prefers GPU but falls back to CPU if memory is tight."""
     global _prior_model, _prior_tokenizer
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Check if GPU is already saturated (T4 usually 14-15GB capacity)
+    gpu_full = False
+    if torch.cuda.is_available():
+        _log_gpu_memory("Pre-load Check")
+        free_mem = torch.cuda.mem_get_info()[0] / (1024**3)
+        if free_mem < 2.5: # We need roughly 2.5GB for weights + activations
+            log.warning(f"[Prior] GPU memory tight ({free_mem:.2f}GB free). Forcing CPU for Prior model.")
+            gpu_full = True
+            
+    device = "cuda" if (torch.cuda.is_available() and not gpu_full) else "cpu"
     
     if _prior_model is None:
         try:
-            log.info(f"[Prior] Loading Nucleotide Transformer: {PRIOR_MODEL_NAME}")
+            log.info(f"[Prior] Loading Nucleotide Transformer: {PRIOR_MODEL_NAME} -> {device}")
             _prior_tokenizer = AutoTokenizer.from_pretrained(PRIOR_MODEL_NAME)
             _prior_model = AutoModelForMaskedLM.from_pretrained(
                 PRIOR_MODEL_NAME,
                 torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                trust_remote_code=True
             ).to(device)
             _prior_model.eval()
-            log.info("[Prior] Nucleotide Transformer is LIVE.")
+            log.info(f"[Prior] Nucleotide Transformer is LIVE on {device}.")
+            if device == "cuda":
+                _log_gpu_memory("Post-load Check")
         except Exception as e:
             log.error(f"[Prior] Failed to load model: {e}")
             raise
@@ -225,7 +255,8 @@ async def compute_biological_prior_score(sequence: str) -> float:
         
         window_size = 5000
         stride = 4000
-        batch_size = 8 # Batch windows together for T4 parallel speedup
+        # Dynamic batch size: use 8 for GPU, 1 for CPU to minimize RAM spike
+        batch_size = 8 if device.type == "cuda" else 2
         
         chunks = []
         for i in range(0, len(sequence), stride):
@@ -240,14 +271,22 @@ async def compute_biological_prior_score(sequence: str) -> float:
         # Process chunks in sub-batches
         for i in range(0, len(chunks), batch_size):
             sub_batch = chunks[i : i + batch_size]
-            inputs = tokenizer(sub_batch, return_tensors="pt", padding=True, truncation=True).to(device)
-            # labels=input_ids for perplexity-style scoring
-            outputs = model(**inputs, labels=inputs["input_ids"])
-            
-            # CE loss is averaged over the batch by default in Transformers
-            # But we want individual scores for better averaging if batch size varies
-            # NT 500M logic: loss is returned as a scalar (mean)
-            all_losses.append(float(outputs.loss.cpu().item()))
+            try:
+                inputs = tokenizer(sub_batch, return_tensors="pt", padding=True, truncation=True).to(device)
+                outputs = model(**inputs, labels=inputs["input_ids"])
+                all_losses.append(float(outputs.loss.cpu().item()))
+            except torch.cuda.OutOfMemoryError:
+                log.warning("[Prior] CUDA OOM during batch. Shrinking batch and clearing cache...")
+                torch.cuda.empty_cache()
+                gc.collect()
+                # Fallback to serial processing for this sub-batch
+                for seq in sub_batch:
+                    tiny_input = tokenizer(seq, return_tensors="pt").to(device)
+                    tiny_out = model(**tiny_input, labels=tiny_input["input_ids"])
+                    all_losses.append(float(tiny_out.loss.cpu().item()))
+            except Exception as e:
+                log.error(f"[Prior] Scoring error: {e}")
+                raise
             
         # Prior score is negative cross-entropy (log-likelihood)
         return -float(np.mean(all_losses))
