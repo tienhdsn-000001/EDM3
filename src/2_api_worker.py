@@ -205,6 +205,7 @@ import aiohttp
 
 _evo2_model = None
 evo2_lock = asyncio.Lock()
+_last_successful_window = None # Global sticky window state
 
 async def _query_nvidia_hosted_evo2(sequence: str, api_key: str) -> float:
     """Queries the NVIDIA Hosted API for high-rigor biological scores."""
@@ -279,8 +280,9 @@ def _get_evo2_model():
             log.info(f"[Evo2] Verification/Download phase started. This may take 5-10 minutes if not cached...")
             
             # This call handles weight download/verification and internal device mapping.
-            # IMPORTANT: The Evo2 class handles internal device mapping. Do NOT call .to() or .eval().
-            _evo2_model = Evo2(model_name)
+            # IMPORTANT: The Evo2 class handles internal device mapping. 
+            # We pass device explicitly to override if forced to CPU.
+            _evo2_model = Evo2(model_name, device=device)
             
             log.info(f"[Evo2] Model {model_name} is LIVE.")
         except Exception as e:
@@ -327,18 +329,27 @@ async def compute_real_evo2_likelihood(sequence: str) -> float:
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         return -float(loss.cpu().item())
 
+    global _last_successful_window
+    
     try:
+        # If we have a sticky window from a previous OOM in this session, use it immediately
+        if _last_successful_window and len(sequence) > _last_successful_window:
+            start = max(0, (len(sequence) // 2) - (_last_successful_window // 2))
+            windowed = sequence[start : start + _last_successful_window]
+            return _score(windowed)
+            
         return _score(sequence)
     except Exception as e:
         if "CUDA out of memory" in str(e):
             # Tiered fallback to ensure we get a score even on restricted hardware (T4)
-            windows = [32768, 16384, 8192, 4096]
+            # Added 1024 as the last resort before absolute failure.
+            windows = [32768, 16384, 8192, 4096, 1024]
             
             for win_size in windows:
                 if len(sequence) <= win_size:
                     continue
                     
-                log.warning(f"[Evo2] OOM. Retrying with center {win_size//1000}k window...")
+                log.warning(f"[Evo2] OOM. Retrying with center {win_size}bp window...")
                 
                 # Aggressive memory reclamation
                 gc.collect()
@@ -352,7 +363,10 @@ async def compute_real_evo2_likelihood(sequence: str) -> float:
                 windowed = sequence[start:end]
                 
                 try:
-                    return _score(windowed)
+                    score = _score(windowed)
+                    # Update sticky window to avoid future OOM attempts this session
+                    _last_successful_window = win_size
+                    return score
                 except Exception as e2:
                     if "CUDA out of memory" in str(e2):
                         continue # Try next smaller window
