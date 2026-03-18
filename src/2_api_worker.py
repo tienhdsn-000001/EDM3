@@ -246,50 +246,75 @@ def _get_prior_resources():
 @torch.no_grad()
 async def compute_biological_prior_score(sequence: str) -> float:
     """
-    Computes biological viability using a batched sliding window with NT 500M.
-    Strict asyncio locking prevents GPU contention.
+    Paranoid Scoring Mode:
+    1. Tokenize the ENTIRE sequence on CPU.
+    2. Split into 1024-token chunks (the model's hard context limit).
+    3. Run forward passes one-by-one on GPU.
+    4. Aggressively del and empty_cache to prevent VRAM accumulation.
     """
     async with prior_lock:
         model, tokenizer = _get_prior_resources()
         device = next(model.parameters()).device
         
-        window_size = 5000
-        stride = 4000
-        # Dynamic batch size: use 8 for GPU, 1 for CPU to minimize RAM spike
-        batch_size = 8 if device.type == "cuda" else 2
+        # Tokenize full sequence on CPU (avoid device=device here)
+        # Note: 131kb sequence results in ~22k tokens.
+        full_inputs = tokenizer(
+            sequence, 
+            return_tensors="pt", 
+            padding=False, 
+            truncation=False
+        )
         
-        chunks = []
-        for i in range(0, len(sequence), stride):
-            chunk = sequence[i : i + window_size]
-            if len(chunk) < 6: break
-            chunks.append(chunk)
-            if len(sequence) <= window_size: break
+        input_ids = full_inputs["input_ids"][0] # Shape: [N_total]
+        attention_mask = full_inputs["attention_mask"][0]
         
-        if not chunks: return 0.0
+        N_total = input_ids.shape[0]
+        chunk_size = 1024 # Model context limit
         
         all_losses = []
-        # Process chunks in sub-batches
-        for i in range(0, len(chunks), batch_size):
-            sub_batch = chunks[i : i + batch_size]
-            try:
-                inputs = tokenizer(sub_batch, return_tensors="pt", padding=True, truncation=True).to(device)
-                outputs = model(**inputs, labels=inputs["input_ids"])
-                all_losses.append(float(outputs.loss.cpu().item()))
-            except torch.cuda.OutOfMemoryError:
-                log.warning("[Prior] CUDA OOM during batch. Shrinking batch and clearing cache...")
-                torch.cuda.empty_cache()
-                gc.collect()
-                # Fallback to serial processing for this sub-batch
-                for seq in sub_batch:
-                    tiny_input = tokenizer(seq, return_tensors="pt").to(device)
-                    tiny_out = model(**tiny_input, labels=tiny_input["input_ids"])
-                    all_losses.append(float(tiny_out.loss.cpu().item()))
-            except Exception as e:
-                log.error(f"[Prior] Scoring error: {e}")
-                raise
+        
+        # Sequentially process windows of tokens instead of BP windows
+        for start_idx in range(0, N_total, chunk_size):
+            end_idx = min(start_idx + chunk_size, N_total)
             
-        # Prior score is negative cross-entropy (log-likelihood)
-        return -float(np.mean(all_losses))
+            # Prepare single chunk
+            chunk_input_ids = input_ids[start_idx:end_idx].unsqueeze(0).to(device)
+            chunk_mask = attention_mask[start_idx:end_idx].unsqueeze(0).to(device)
+            
+            try:
+                # Forward pass
+                outputs = model(
+                    input_ids=chunk_input_ids,
+                    attention_mask=chunk_mask,
+                    labels=chunk_input_ids # CE Loss relative to original tokens
+                )
+                
+                loss_val = float(outputs.loss.cpu().item())
+                all_losses.append(loss_val)
+                
+                # Aggressive Cleanup
+                del outputs
+                del chunk_input_ids
+                del chunk_mask
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                    
+            except torch.cuda.OutOfMemoryError:
+                log.warning(f"[Memory] OOM during chunk {start_idx}:{end_idx}. Skipping chunk.")
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+                gc.collect()
+            except Exception as e:
+                log.error(f"[Prior] Error scoring chunk: {e}")
+                raise
+        
+        # Free CPU tokens
+        del input_ids
+        del attention_mask
+        del full_inputs
+        
+        # Negative loss = log-likelihood
+        return -float(np.mean(all_losses)) if all_losses else 0.0
 
 
 async def query_alphagenome_api(
