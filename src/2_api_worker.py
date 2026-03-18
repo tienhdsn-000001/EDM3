@@ -59,6 +59,8 @@ BASE_BACKOFF = 3.0           # Increased base backoff for gRPC stability
 ALPHA_REWARD = 1.0           # α in R(x) = exp(-α·L_mask) + β·log P_Prior
 BETA_REWARD = 0.1            # β weight on Bio-Prior term
 PRIOR_MODEL_NAME = "InstaDeepAI/nucleotide-transformer-500m-human-ref"
+EVO2_MODEL_NAME = "evo2_7b"
+HARDWARE_BOUNDARY_GB = 22.0  # Safe threshold for local 16-bit 7B weights (14GB + cache)
 
 # AlphaGenome prediction parameters
 # IMPORTANT: AlphaGenome only supports specific lengths: [16384, 131072, 524288, 1048576]
@@ -194,127 +196,156 @@ def _get_api_client(api_key: str):
 
 
 # ---------------------------------------------------------------------------
-# Biological Prior: Nucleotide Transformer
+# Biological Prior Orchestrator: Multi-Tier Fallback
 # ---------------------------------------------------------------------------
+
+import aiohttp
 
 _prior_model = None
 _prior_tokenizer = None
+_mode_info = "init"
 prior_lock = asyncio.Lock()
 
-def _log_gpu_memory(label: str):
-    """Logs the current GPU memory usage."""
-    if not torch.cuda.is_available():
-        return
-    allocated = torch.cuda.memory_allocated() / (1024**3)
-    reserved = torch.cuda.memory_reserved() / (1024**3)
-    log.info(f"[Memory] {label} | Allocated: {allocated:.2f}GB | Reserved: {reserved:.2f}GB")
+async def _query_nvidia_nim_evo2(sequence: str, api_key: str) -> float:
+    """Queries the NVIDIA Hosted NIM API for high-rigor Evo2 scores."""
+    url = "https://health.api.nvidia.com/v1/biology/arc/evo2-7b/generate"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "sequence": sequence,
+        "num_tokens": 1,
+        "top_k": 1,
+        "enable_sampled_probs": True
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    if "probabilities" in result and len(result["probabilities"]) > 0:
+                        # Log-probability returned directly or as raw prob
+                        p = float(result["probabilities"][0])
+                        return float(np.log(p + 1e-12))
+                    return 0.0
+                return 0.0
+    except Exception:
+        return 0.0
 
 def _get_prior_resources():
-    """Loads the Nucleotide Transformer 500M. Prefers GPU but falls back to CPU if memory is tight."""
-    global _prior_model, _prior_tokenizer
+    """Hardware-aware prior factory: Local 16-bit, Local 4-bit, NIM, or NT-500M."""
+    global _prior_model, _prior_tokenizer, _mode_info
     
-    # Check if GPU is already saturated (T4 usually 14-15GB capacity)
-    gpu_full = False
+    # Mode selection logic
+    mode = os.environ.get("PRIOR_MODE", "auto").lower()
+    nv_key = os.environ.get("NVIDIA_API_KEY")
+    use_4bit = os.environ.get("USE_4BIT_QUANT", "False").lower() == "true"
+    
+    if _prior_model is not None or _mode_info == "nim":
+        return _prior_model, _prior_tokenizer, _mode_info
+
+    # VRAM Check
+    vram_gb = 0.0
     if torch.cuda.is_available():
-        _log_gpu_memory("Pre-load Check")
-        free_mem = torch.cuda.mem_get_info()[0] / (1024**3)
-        if free_mem < 2.5: # We need roughly 2.5GB for weights + activations
-            log.warning(f"[Prior] GPU memory tight ({free_mem:.2f}GB free). Forcing CPU for Prior model.")
-            gpu_full = True
-            
-    device = "cuda" if (torch.cuda.is_available() and not gpu_full) else "cpu"
-    
-    if _prior_model is None:
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+
+    # 1. Decision Bridge: Force NIM if key exists and VRAM is low
+    if (mode == "nim" or (mode == "auto" and vram_gb < HARDWARE_BOUNDARY_GB)) and nv_key:
+        log.info("[Prior] Hardware Boundary Triggered: VRAM < 22GB. Routing to NVIDIA NIM API (Cloud).")
+        _mode_info = "nim"
+        return None, None, "nim"
+
+    # 2. Decision Bridge: Check for 4-bit "Escape Hatch"
+    if (mode == "evo2" or mode == "auto") and vram_gb < HARDWARE_BOUNDARY_GB and use_4bit:
+        log.warning("!!! HARDWARE BOUNDARY TRIGGERED !!!")
+        log.warning(f"Detected {vram_gb:.1f}GB VRAM. 16-bit Evo2 loads require >22GB.")
+        log.info("[Prior] Attempting 4-bit quantization load via bitsandbytes...")
         try:
-            log.info(f"[Prior] Loading Nucleotide Transformer: {PRIOR_MODEL_NAME} -> {device}")
-            _prior_tokenizer = AutoTokenizer.from_pretrained(PRIOR_MODEL_NAME)
-            _prior_model = AutoModelForMaskedLM.from_pretrained(
-                PRIOR_MODEL_NAME,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                trust_remote_code=True
-            ).to(device)
-            _prior_model.eval()
-            log.info(f"[Prior] Nucleotide Transformer is LIVE on {device}.")
-            if device == "cuda":
-                _log_gpu_memory("Post-load Check")
+            from evo2 import Evo2
+            _prior_model = Evo2(EVO2_MODEL_NAME, device="cuda", load_in_4bit=True)
+            _mode_info = "evo2_4bit"
+            log.info("[Prior] Evo2 7B is LIVE (4-bit mode).")
+            return _prior_model, None, "evo2_4bit"
         except Exception as e:
-            log.error(f"[Prior] Failed to load model: {e}")
-            raise
-    return _prior_model, _prior_tokenizer
+            log.error(f"[Prior] 4-bit load failed: {e}. Falling back to NT-500M.")
+
+    # 3. Decision Bridge: Local 16-bit (SOTA Path)
+    if (mode == "evo2" or mode == "auto") and vram_gb >= HARDWARE_BOUNDARY_GB:
+        log.info(f"[Prior] SOTA Path: Detected {vram_gb:.1f}GB VRAM. Loading Evo2 7B (16-bit).")
+        try:
+            from evo2 import Evo2
+            _prior_model = Evo2(EVO2_MODEL_NAME, device="cuda")
+            _mode_info = "evo2_16bit"
+            return _prior_model, None, "evo2_16bit"
+        except Exception as e:
+            log.error(f"[Prior] Evo2 load failed: {e}")
+
+    # 4. Final Fallback: Nucleotide Transformer 500M (Reliability Path)
+    log.info(f"[Prior] Reliability Path: Using Nucleotide Transformer 500M on {vram_gb:.1f}GB VRAM.")
+    try:
+        _prior_tokenizer = AutoTokenizer.from_pretrained(PRIOR_MODEL_NAME)
+        _prior_model = AutoModelForMaskedLM.from_pretrained(
+            PRIOR_MODEL_NAME,
+            torch_dtype=torch.float16 if vram_gb > 2.0 else torch.float32,
+            trust_remote_code=True
+        ).to("cuda" if vram_gb > 2.0 else "cpu")
+        _prior_model.eval()
+        _mode_info = "nt_500m"
+        return _prior_model, _prior_tokenizer, "nt_500m"
+    except Exception as e:
+        log.error(f"[Prior] NT-500M Fallback failed: {e}")
+        _mode_info = "none"
+        return None, None, "none"
 
 
 @torch.no_grad()
 async def compute_biological_prior_score(sequence: str) -> float:
-    """
-    Paranoid Scoring Mode:
-    1. Tokenize the ENTIRE sequence on CPU.
-    2. Split into 1024-token chunks (the model's hard context limit).
-    3. Run forward passes one-by-one on GPU.
-    4. Aggressively del and empty_cache to prevent VRAM accumulation.
-    """
+    """Multi-tiered scoring entry point: handles local NT, local Evo2, or Cloud NIM."""
     async with prior_lock:
-        model, tokenizer = _get_prior_resources()
-        device = next(model.parameters()).device
+        model, tokenizer, mode = _get_prior_resources()
         
-        # Tokenize full sequence on CPU (avoid device=device here)
-        # Note: 131kb sequence results in ~22k tokens.
-        full_inputs = tokenizer(
-            sequence, 
-            return_tensors="pt", 
-            padding=False, 
-            truncation=False
-        )
-        
-        input_ids = full_inputs["input_ids"][0] # Shape: [N_total]
-        attention_mask = full_inputs["attention_mask"][0]
-        
-        N_total = input_ids.shape[0]
-        chunk_size = 1024 # Model context limit
-        
-        all_losses = []
-        
-        # Sequentially process windows of tokens instead of BP windows
-        for start_idx in range(0, N_total, chunk_size):
-            end_idx = min(start_idx + chunk_size, N_total)
+        if mode == "nim":
+            nv_key = os.environ.get("NVIDIA_API_KEY")
+            return await _query_nvidia_nim_evo2(sequence, nv_key)
             
-            # Prepare single chunk
-            chunk_input_ids = input_ids[start_idx:end_idx].unsqueeze(0).to(device)
-            chunk_mask = attention_mask[start_idx:end_idx].unsqueeze(0).to(device)
+        if mode in ["evo2_16bit", "evo2_4bit"]:
+            # Local Evo2 scoring (uses StripedHyena architecture)
+            input_ids = torch.tensor(
+                model.tokenizer.tokenize(sequence),
+                dtype=torch.int,
+            ).unsqueeze(0).to("cuda")
+            outputs, _ = model(input_ids)
+            logits = outputs[0]
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = input_ids[:, 1:].contiguous()
+            loss_fct = torch.nn.CrossEntropyLoss(reduction='mean')
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            return -float(loss.cpu().item())
+
+        if mode == "nt_500m":
+            # Paranoid Sequential Token Scoring (T4-optimized)
+            device = next(model.parameters()).device
+            full_inputs = tokenizer(sequence, return_tensors="pt", padding=False, truncation=False)
+            input_ids = full_inputs["input_ids"][0]
+            attention_mask = full_inputs["attention_mask"][0]
+            N_total = input_ids.shape[0]
+            chunk_size = 1024
+            all_losses = []
+            for start_idx in range(0, N_total, chunk_size):
+                end_idx = min(start_idx + chunk_size, N_total)
+                chunk_input_ids = input_ids[start_idx:end_idx].unsqueeze(0).to(device)
+                chunk_mask = attention_mask[start_idx:end_idx].unsqueeze(0).to(device)
+                try:
+                    outputs = model(input_ids=chunk_input_ids, attention_mask=chunk_mask, labels=chunk_input_ids)
+                    all_losses.append(float(outputs.loss.cpu().item()))
+                    del outputs, chunk_input_ids, chunk_mask
+                    if device.type == "cuda": torch.cuda.empty_cache()
+                except torch.cuda.OutOfMemoryError:
+                    if device.type == "cuda": torch.cuda.empty_cache()
+            return -float(np.mean(all_losses)) if all_losses else 0.0
             
-            try:
-                # Forward pass
-                outputs = model(
-                    input_ids=chunk_input_ids,
-                    attention_mask=chunk_mask,
-                    labels=chunk_input_ids # CE Loss relative to original tokens
-                )
-                
-                loss_val = float(outputs.loss.cpu().item())
-                all_losses.append(loss_val)
-                
-                # Aggressive Cleanup
-                del outputs
-                del chunk_input_ids
-                del chunk_mask
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
-                    
-            except torch.cuda.OutOfMemoryError:
-                log.warning(f"[Memory] OOM during chunk {start_idx}:{end_idx}. Skipping chunk.")
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
-                gc.collect()
-            except Exception as e:
-                log.error(f"[Prior] Error scoring chunk: {e}")
-                raise
-        
-        # Free CPU tokens
-        del input_ids
-        del attention_mask
-        del full_inputs
-        
-        # Negative loss = log-likelihood
-        return -float(np.mean(all_losses)) if all_losses else 0.0
+    return 0.0
 
 
 async def query_alphagenome_api(
